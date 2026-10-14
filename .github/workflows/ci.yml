@@ -27,7 +27,7 @@ jobs:
         run: bash scripts/install-ci-zig.sh
 
       - name: rust core
-        run: cargo test --quiet
+        run: WUPZ_EXPECT_BACKEND=zig-simd cargo test --quiet
 
       - name: benchmark comparison contract
         run: bash tests/bench_smoke.sh

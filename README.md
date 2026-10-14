@@ -99,6 +99,14 @@ Without zig the crate still builds and tests — the fallback keeps contributors
 unblocked. (On macOS the archive is written with `libtool`; zig's own archive
 members are not 8-byte aligned and Apple's `ld` rejects them.)
 
+The regular and nightly CI lanes, and `scripts/ci.sh`, set
+`WUPZ_EXPECT_BACKEND=zig-simd` for the Rust tests. The seam test then fails if
+the linked fold implementation fell back to Rust, even when all scalar parity
+checks pass. Plain `cargo test` still accepts either backend; use
+`WUPZ_NO_ZIG=1 WUPZ_EXPECT_BACKEND=rust-scalar cargo test` to explicitly validate
+the fallback. `WUPZ_EXPECT_BACKEND` checks the compiled backend at test runtime;
+it does not select a backend or change the library's build behavior.
+
 Cross-compiling with Cargo also selects `rust-scalar`: the current Zig build
 and archiver produce host objects, so they are used only when `HOST == TARGET`.
 Target-aware Zig linking is not implemented yet. Rust's target libraries and a

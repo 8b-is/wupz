@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 step() { printf '\n== %s ==\n' "$1"; }
 
 step "rust core (plan · incremental · arena · pack-image)"
-cargo test --quiet
+WUPZ_EXPECT_BACKEND=zig-simd cargo test --quiet
 
 step "benchmark comparison contract (synthetic command outputs)"
 bash tests/bench_smoke.sh

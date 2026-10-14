@@ -1,6 +1,7 @@
 //! The seam, exercised: the linked Zig kernel must match the Rust scalar
 //! reference on every length. If `zig` was unavailable at build time this runs
 //! against the fallback and still passes — it reports which backend it got.
+//! CI sets WUPZ_EXPECT_BACKEND=zig-simd to reject an unintended fallback.
 
 use wupz_core::fold;
 
@@ -24,6 +25,15 @@ fn reports_the_compiled_backend() {
         "unexpected backend: {backend}"
     );
     println!("wupz fold backend = {backend}");
+    if let Some(expected) = std::env::var_os("WUPZ_EXPECT_BACKEND") {
+        assert_eq!(
+            backend,
+            expected
+                .to_str()
+                .expect("WUPZ_EXPECT_BACKEND must be UTF-8"),
+            "compiled fold backend does not match WUPZ_EXPECT_BACKEND"
+        );
+    }
 }
 
 #[test]

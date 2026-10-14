@@ -33,4 +33,4 @@ jobs:
         run: zig test wupz-zig/src/kernels.zig
 
       - name: the seam on Zig master (Rust core links the master-built kernels)
-        run: cargo test --quiet
+        run: WUPZ_EXPECT_BACKEND=zig-simd cargo test --quiet

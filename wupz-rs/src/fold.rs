@@ -5,6 +5,9 @@
 //! so they must agree bit for bit. `tests/zig_parity.rs` asserts exactly that
 //! across every length from 0 to 1088 — the seam is exercised, not assumed.
 
+use crate::arena::Arena;
+use crate::incremental::RationalPQ;
+
 /// The scalar reference. Also the fallback when zig is absent.
 /// Folds each byte directly into the accumulator without staging 8-byte slices
 /// onto the stack (`word: [u8; 8]`), preventing stack retention across all
@@ -25,12 +28,50 @@ pub fn xor_fold_scalar(bytes: &[u8]) -> u64 {
     acc
 }
 
+/// 64-byte cache-line aligned Litany Wire Frame (`#[repr(C, align(64))]`).
+/// Matches `wupz_litany_wire_frame_t` in `include/wupz_abi.h` and `LitanyWireFrame` in Zig.
+#[repr(C, align(64))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LitanyWireFrame {
+    pub frame32: [u8; 32],
+    pub bfp64_pos: u64,
+    pub bfp64_neg: u64,
+    pub ratio_p: u32,
+    pub ratio_q: u32,
+    pub spqt_root: [u8; 3],
+    pub qt_mask: u8,
+    pub lanes_active: u16,
+    pub wire_seal16: u16,
+}
+
+const _: [(); 64] = [(); core::mem::size_of::<LitanyWireFrame>()];
+const _: [(); 64] = [(); core::mem::align_of::<LitanyWireFrame>()];
+
 #[cfg(have_zig)]
 mod zig {
+    use super::LitanyWireFrame;
     unsafe extern "C" {
         pub fn wupz_xor_fold(ptr: *const u8, len: usize) -> u64;
         pub fn wupz_byte_diff(a: *const u8, b: *const u8, len: usize) -> u64;
         pub fn wupz_popcount(ptr: *const u8, len: usize) -> u64;
+        pub fn wupz_seal_litany_wire_64b(
+            out_wire: *mut LitanyWireFrame,
+            raw_ptr: *const u8,
+            raw_len: usize,
+            packed_ptr: *const u8,
+            packed_len: usize,
+            gate: u8,
+            qt: u8,
+        ) -> u32;
+        pub fn wupz_verify_litany_wire_64b(
+            wire: *const LitanyWireFrame,
+            raw_ptr: *const u8,
+            raw_len: usize,
+            packed_ptr: *const u8,
+            packed_len: usize,
+            gate: u8,
+            qt: u8,
+        ) -> u32;
     }
 }
 
@@ -108,8 +149,14 @@ pub const GATE_0X62: u8 = 0x62;
 pub const FRAME_ABI_V1: u8 = 0x01;
 /// Alternating 0x55 quantization bitplane mask byte (`qt:55`).
 pub const QUANT_QT55: u8 = 0x55;
+/// Active `1/1` lane ratio word (`0x0101`).
+pub const LANES_1_OF_1: u16 = 0x0101;
 /// Canonical 64-bit `kompress-super-ultra` fold signature at `qt:55` and gate `0x62`.
 pub const FOLD_0XE1034E575C371AB0: u64 = 0xe103_4e57_5c37_1ab0;
+/// Top-100 `8b-is` sweep anchor fold (`0x48031a0d4c054e69`).
+pub const FOLD_0X48031A0D4C054E69: u64 = 0x4803_1a0d_4c05_4e69;
+/// `beehive` 5-stage consolidation target fold (`0x206f642074737557`).
+pub const FOLD_0X206F642074737557: u64 = 0x206f_6420_7473_7557;
 
 /// Broadcast an 8-bit quantization mask across all 8 bytes of a 64-bit word.
 #[inline]
@@ -153,6 +200,120 @@ pub const fn bfp64_nand_kleene(pos_a: u64, neg_a: u64, pos_b: u64, neg_b: u64) -
     (n, p)
 }
 
+/// Pack a 15-bit word into a 3-byte SPQT (`1.585 bits/trit`, `3^5 = 243 <= 256` per byte)
+/// base-243 frame.
+#[inline]
+pub const fn pack_word15_to_spqt3b(word15: u16) -> [u8; 3] {
+    let clean = word15 & 0x7FFF;
+    let mut out = [0u8; 3];
+    let mut g = 0usize;
+    while g < 3 {
+        let mut acc = 0u8;
+        let mut pow3 = 1u8;
+        let mut j = 0usize;
+        while j < 5 {
+            let bit_idx = g * 5 + j;
+            let bit = ((clean >> bit_idx) & 1) as u8;
+            let trit_digit = if bit == 1 { 2u8 } else { 1u8 };
+            acc = acc.wrapping_add(trit_digit.wrapping_mul(pow3));
+            pow3 = pow3.wrapping_mul(3);
+            j += 1;
+        }
+        out[g] = acc;
+        g += 1;
+    }
+    out
+}
+
+/// Unpack a 3-byte SPQT base-243 frame back into a 15-bit word.
+#[inline]
+pub const fn unpack_spqt3b_to_word15(spqt: [u8; 3]) -> Option<u16> {
+    let mut word15 = 0u16;
+    let mut g = 0usize;
+    while g < 3 {
+        if spqt[g] >= 243 {
+            return None;
+        }
+        let mut v = spqt[g];
+        let mut j = 0usize;
+        while j < 5 {
+            let digit = v % 3;
+            v /= 3;
+            if digit == 2 {
+                let bit_idx = g * 5 + j;
+                word15 |= 1u16 << bit_idx;
+            }
+            j += 1;
+        }
+        g += 1;
+    }
+    Some(word15)
+}
+
+/// Pack balanced ternary weights (`{-1, 0, +1}`) into a `.rodata.gaia.b158` section slice
+/// inside `arena` at 5 trits/byte (`base-243`, `3^5 = 243 <= 256`) with zero heap allocation.
+pub fn pack_gaia_b158_into<'a>(trits: &[i8], arena: &'a mut Arena) -> Option<&'a [u8]> {
+    let packed_len = (trits.len() + 4) / 5;
+    let out = arena.alloc(packed_len)?;
+    let mut idx = 0usize;
+    let mut i = 0usize;
+    while i < trits.len() {
+        let chunk_end = (i + 5).min(trits.len());
+        let mut byte_val = 0u8;
+        let mut pow3 = 1u8;
+        let mut k = i;
+        while k < chunk_end {
+            let t = trits[k];
+            let digit = if t < 0 { 0u8 } else if t == 0 { 1u8 } else { 2u8 };
+            byte_val = byte_val.wrapping_add(digit.wrapping_mul(pow3));
+            pow3 = pow3.wrapping_mul(3);
+            k += 1;
+        }
+        out[idx] = byte_val;
+        idx += 1;
+        i += 5;
+    }
+    Some(&out[..idx])
+}
+
+/// Tightened `.rodata.gaia.b158` in-register XOR fold + exact `p/q` compression ratio.
+pub fn xor_fold_gaia_b158(trits: &[i8]) -> (u64, usize, RationalPQ) {
+    let mut acc = 0u64;
+    let mut word_buf = [0u8; 8];
+    let mut word_idx = 0usize;
+    let mut packed_len = 0usize;
+    let mut i = 0usize;
+    while i < trits.len() {
+        let chunk_end = (i + 5).min(trits.len());
+        let mut byte_val = 0u8;
+        let mut pow3 = 1u8;
+        let mut k = i;
+        while k < chunk_end {
+            let t = trits[k];
+            let digit = if t < 0 { 0u8 } else if t == 0 { 1u8 } else { 2u8 };
+            byte_val = byte_val.wrapping_add(digit.wrapping_mul(pow3));
+            pow3 = pow3.wrapping_mul(3);
+            k += 1;
+        }
+        word_buf[word_idx] = byte_val;
+        word_idx += 1;
+        packed_len += 1;
+        if word_idx == 8 {
+            acc ^= u64::from_le_bytes(word_buf);
+            word_buf = [0u8; 8];
+            word_idx = 0;
+        }
+        i += 5;
+    }
+    let mut tail = 0usize;
+    while tail < word_idx {
+        acc ^= word_buf[tail] as u64;
+        tail += 1;
+    }
+    let ratio = RationalPQ::reduce(trits.len() as u64, packed_len.max(1) as u64);
+    (acc, packed_len, ratio)
+}
+
 /// Seal `(raw, packed)` into a 32-byte `0x62`-gated `wupz` frame.
 pub fn seal_frame_32b(raw: &[u8], packed: &[u8], gate: u8) -> [u8; 32] {
     let mut frame = [0u8; 32];
@@ -174,6 +335,123 @@ pub fn verify_frame_32b(frame: &[u8; 32], raw: &[u8], packed: &[u8], gate: u8) -
     }
     let expected = seal_frame_32b(raw, packed, gate);
     byte_diff(frame, &expected) == 0
+}
+
+/// Scalar reference for sealing a 64-byte cache-line-aligned `LitanyWireFrame`.
+pub fn seal_litany_wire_64b_scalar(raw: &[u8], packed: &[u8], gate: u8, qt: u8) -> LitanyWireFrame {
+    let frame32 = seal_frame_32b(raw, packed, gate);
+    let mut raw_fold_bytes = [0u8; 8];
+    raw_fold_bytes.copy_from_slice(&frame32[0..8]);
+    let raw_fold = u64::from_le_bytes(raw_fold_bytes);
+
+    let mut packed_fold_bytes = [0u8; 8];
+    packed_fold_bytes.copy_from_slice(&frame32[8..16]);
+    let packed_fold = u64::from_le_bytes(packed_fold_bytes);
+
+    let composite_fold = raw_fold ^ packed_fold;
+    let (pos, neg) = pack_fold_bfp64(composite_fold, qt);
+    let ratio = RationalPQ::reduce(raw.len() as u64, packed.len().max(1) as u64);
+    let spqt = pack_word15_to_spqt3b((composite_fold & 0x7FFF) as u16);
+
+    let mut wire = LitanyWireFrame {
+        frame32,
+        bfp64_pos: pos,
+        bfp64_neg: neg,
+        ratio_p: ratio.p as u32,
+        ratio_q: ratio.q as u32,
+        spqt_root: spqt,
+        qt_mask: qt,
+        lanes_active: LANES_1_OF_1,
+        wire_seal16: 0,
+    };
+    // SAFETY: `LitanyWireFrame` is `#[repr(C, align(64))]` with no uninitialized padding bytes.
+    let wire_bytes = unsafe {
+        core::slice::from_raw_parts((&wire as *const LitanyWireFrame).cast::<u8>(), 64)
+    };
+    wire.wire_seal16 = (xor_fold(&wire_bytes[0..62]) & 0xFFFF) as u16;
+    wire
+}
+
+/// Seal `(raw, packed)` into a 64-byte cache-line-aligned `LitanyWireFrame`.
+#[cfg(have_zig)]
+pub fn seal_litany_wire_64b(raw: &[u8], packed: &[u8], gate: u8, qt: u8) -> LitanyWireFrame {
+    let mut out = LitanyWireFrame {
+        frame32: [0u8; 32],
+        bfp64_pos: 0,
+        bfp64_neg: 0,
+        ratio_p: 0,
+        ratio_q: 1,
+        spqt_root: [0u8; 3],
+        qt_mask: qt,
+        lanes_active: LANES_1_OF_1,
+        wire_seal16: 0,
+    };
+    // SAFETY: `out`, `raw`, and `packed` are valid slices for the duration of the C call.
+    let ok = unsafe {
+        zig::wupz_seal_litany_wire_64b(
+            &mut out,
+            raw.as_ptr(),
+            raw.len(),
+            packed.as_ptr(),
+            packed.len(),
+            gate,
+            qt,
+        )
+    };
+    debug_assert_eq!(ok, 1);
+    out
+}
+
+#[cfg(not(have_zig))]
+pub fn seal_litany_wire_64b(raw: &[u8], packed: &[u8], gate: u8, qt: u8) -> LitanyWireFrame {
+    seal_litany_wire_64b_scalar(raw, packed, gate, qt)
+}
+
+/// Verify a 64-byte cache-line-aligned `LitanyWireFrame` in constant shape.
+#[cfg(have_zig)]
+pub fn verify_litany_wire_64b(
+    wire: &LitanyWireFrame,
+    raw: &[u8],
+    packed: &[u8],
+    gate: u8,
+    qt: u8,
+) -> bool {
+    // SAFETY: `wire`, `raw`, and `packed` are valid pointers for the duration of the C call.
+    unsafe {
+        zig::wupz_verify_litany_wire_64b(
+            wire,
+            raw.as_ptr(),
+            raw.len(),
+            packed.as_ptr(),
+            packed.len(),
+            gate,
+            qt,
+        ) == 1
+    }
+}
+
+#[cfg(not(have_zig))]
+pub fn verify_litany_wire_64b(
+    wire: &LitanyWireFrame,
+    raw: &[u8],
+    packed: &[u8],
+    gate: u8,
+    qt: u8,
+) -> bool {
+    if (wire.bfp64_pos & wire.bfp64_neg) != 0 {
+        return false;
+    }
+    if unpack_spqt3b_to_word15(wire.spqt_root).is_none() {
+        return false;
+    }
+    let expected = seal_litany_wire_64b_scalar(raw, packed, gate, qt);
+    let a = unsafe {
+        core::slice::from_raw_parts((wire as *const LitanyWireFrame).cast::<u8>(), 64)
+    };
+    let b = unsafe {
+        core::slice::from_raw_parts((&expected as *const LitanyWireFrame).cast::<u8>(), 64)
+    };
+    byte_diff(a, b) == 0
 }
 
 #[cfg(test)]
@@ -230,5 +508,43 @@ mod tests {
             Some(FOLD_0XE1034E575C371AB0)
         );
         assert_eq!(unpack_fold_bfp64(pos | 0x02, neg, QUANT_QT55), None);
+    }
+
+    #[test]
+    fn litany_wire_64b_zig_rust_parity_and_gaia_b158() {
+        let raw = [0x48u8; 3761];
+        let packed = [0x20u8; 3314];
+        let mut wire = seal_litany_wire_64b(&raw, &packed, GATE_0X62, QUANT_QT55);
+        let scalar = seal_litany_wire_64b_scalar(&raw, &packed, GATE_0X62, QUANT_QT55);
+        assert_eq!(wire, scalar);
+        assert_eq!((&wire as *const LitanyWireFrame as usize) % 64, 0);
+        assert_eq!(wire.ratio_p, 3761);
+        assert_eq!(wire.ratio_q, 3314);
+        assert_eq!(wire.lanes_active, LANES_1_OF_1);
+        assert!(verify_litany_wire_64b(
+            &wire,
+            &raw,
+            &packed,
+            GATE_0X62,
+            QUANT_QT55
+        ));
+
+        wire.wire_seal16 ^= 0x0001;
+        assert!(!verify_litany_wire_64b(
+            &wire,
+            &raw,
+            &packed,
+            GATE_0X62,
+            QUANT_QT55
+        ));
+
+        let trits = [1i8, -1, 0, 1, -1, 1, 1, 0, -1, 0, 1, -1, 1, 0, -1];
+        let mut arena = Arena::with_capacity(64);
+        let packed_gaia = pack_gaia_b158_into(&trits, &mut arena).unwrap();
+        assert_eq!(packed_gaia.len(), 3);
+        let (fold_val, len_val, ratio) = xor_fold_gaia_b158(&trits);
+        assert_eq!(len_val, 3);
+        assert_eq!(ratio, RationalPQ { p: 5, q: 1 });
+        assert_eq!(fold_val, xor_fold_scalar(packed_gaia));
     }
 }

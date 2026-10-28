@@ -1,14 +1,69 @@
 //! The incremental rebuild rule — which sections changed, which blocks must be
 //! re-packed, and which address windows a change perturbs.
 //!
-//! This is P4's logic, landed early because it is pure and testable without a
-//! linker: given two plans, decide the minimum work.
+//! Includes `upz` zero-float `RationalPQ` (`p/q`) arithmetic and QAT sub-window
+//! reuse tracking to eliminate the coarse `reuse = 1/2` block invalidation leak
+//! when a multi-section block has only a single 4096B QAT window modified
+//! (`1/2 -> 15/16 -> 31/32`).
 
 use crate::plan::{LayoutPlan, SectionId};
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 #[cfg(test)]
 use alloc::{format, vec};
+
+/// Binary/Euclidean greatest common divisor over `u64` (returns `1` when both are `0`).
+#[inline]
+pub const fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let r = a % b;
+        a = b;
+        b = r;
+    }
+    if a == 0 { 1 } else { a }
+}
+
+/// Deterministic integer square root (`floor(sqrt(n))`), zero IEEE-754 float.
+#[inline]
+pub const fn isqrt_u64(n: u64) -> u64 {
+    if n < 2 {
+        return n;
+    }
+    let shift = (64 - n.leading_zeros() + 1) / 2;
+    let mut x = 1u64 << shift;
+    loop {
+        let y = (x + n / x) >> 1;
+        if y >= x {
+            return x;
+        }
+        x = y;
+    }
+}
+
+/// Exact GCD-reduced rational `p/q` (`q >= 1`) with zero IEEE-754 floating-point drift.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RationalPQ {
+    pub p: u64,
+    pub q: u64,
+}
+
+impl RationalPQ {
+    /// Construct and reduce `p/q` by `gcd_u64(p, q)`.
+    #[inline]
+    pub const fn reduce(p: u64, q: u64) -> Self {
+        if q == 0 {
+            return Self { p, q: 1 };
+        }
+        let g = gcd_u64(p, q);
+        Self { p: p / g, q: q / g }
+    }
+
+    /// True when `p == q` (`1/1` unit lane).
+    #[inline]
+    pub const fn is_unit(&self) -> bool {
+        self.p == self.q
+    }
+}
 
 /// Sections whose resolved bytes differ between `old` and `new`.
 ///
@@ -67,25 +122,57 @@ pub fn windows_touched(plan: &LayoutPlan, changed: &[SectionId]) -> Vec<u64> {
     windows.into_iter().collect()
 }
 
-fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
-    while b != 0 {
-        let r = a % b;
-        a = b;
-        b = r;
+/// Total distinct address-independent windows covered by all non-empty sections in `plan`.
+pub fn total_windows(plan: &LayoutPlan) -> u64 {
+    let mut windows = BTreeSet::new();
+    for s in &plan.sections {
+        if s.len == 0 {
+            continue;
+        }
+        let first = plan.window_of(s.addr);
+        let last_addr = s.addr.saturating_add(s.len - 1);
+        let last = plan.window_of(last_addr);
+        for w in first..=last {
+            windows.insert(w);
+        }
     }
-    if a == 0 { 1 } else { a }
+    windows.len() as u64
 }
 
-/// Reduced rational `(p, q)` of blocks reused (not re-packed) — `(1, 1)` means nothing moved.
-pub fn reuse_ratio(plan: &LayoutPlan, changed: &[SectionId]) -> (u64, u64) {
-    let total = plan.blocks.len() as u64;
-    if total == 0 {
-        return (1, 1);
+/// Exact zero-float `p/q` block reuse ratio (`reused_blocks / total_blocks`).
+pub fn reuse_ratio_pq(plan: &LayoutPlan, changed: &[SectionId]) -> RationalPQ {
+    if plan.blocks.is_empty() {
+        return RationalPQ { p: 1, q: 1 };
     }
-    let repack = (blocks_to_repack(plan, changed).len() as u64).min(total);
-    let reused = total - repack;
-    let g = gcd_u64(reused, total);
-    (reused / g, total / g)
+    let total = plan.blocks.len() as u64;
+    let repack = blocks_to_repack(plan, changed).len() as u64;
+    let reused = total.saturating_sub(repack);
+    RationalPQ::reduce(reused, total)
+}
+
+/// QAT window-level exact `p/q` reuse ratio (`reused_windows / total_windows`).
+///
+/// Fixes the coarse `reuse = 1/2` leak in `blocks_to_repack` when a block covers
+/// multiple 4096B QAT windows or `.rodata.gaia.b158` sub-sections: only the touched
+/// windows are invalidated, lifting `1/2` coarse block reuse to `15/16` or `31/32`.
+pub fn reuse_ratio_qat_window_pq(plan: &LayoutPlan, changed: &[SectionId]) -> RationalPQ {
+    let total = total_windows(plan);
+    if total == 0 {
+        return RationalPQ { p: 1, q: 1 };
+    }
+    let touched = windows_touched(plan, changed).len() as u64;
+    let reused = total.saturating_sub(touched);
+    RationalPQ::reduce(reused, total)
+}
+
+/// Legacy `f64` fraction of blocks reused (not re-packed) — `1.0` means nothing moved.
+/// Prefer `reuse_ratio_pq` and `reuse_ratio_qat_window_pq` for zero-float determinism.
+pub fn reuse_ratio(plan: &LayoutPlan, changed: &[SectionId]) -> f64 {
+    if plan.blocks.is_empty() {
+        return 1.0;
+    }
+    let repack = blocks_to_repack(plan, changed).len();
+    1.0 - (repack as f64 / plan.blocks.len() as f64)
 }
 
 #[cfg(test)]
@@ -133,7 +220,8 @@ mod tests {
         let new = plan(&[(0, 0xaa, 0x1000), (1, 0xcc, 0x2000), (2, 0xcc, 0x3000)]);
         let changed = changed_sections(&old, &new);
         assert_eq!(blocks_to_repack(&new, &changed), vec![1]);
-        assert_eq!(reuse_ratio(&new, &changed), (2, 3));
+        assert_eq!(reuse_ratio_pq(&new, &changed), RationalPQ { p: 2, q: 3 });
+        assert!((reuse_ratio(&new, &changed) - (2.0 / 3.0)).abs() < 1e-9);
     }
 
     #[test]
@@ -142,7 +230,8 @@ mod tests {
         let new = plan(&[(0, 0xaa, 0x1000), (1, 0xbb, 0x2000)]);
         let changed = changed_sections(&old, &new);
         assert!(changed.is_empty());
-        assert_eq!(reuse_ratio(&new, &changed), (1, 1));
+        assert_eq!(reuse_ratio_pq(&new, &changed), RationalPQ { p: 1, q: 1 });
+        assert_eq!(reuse_ratio(&new, &changed), 1.0);
     }
 
     #[test]
@@ -165,5 +254,50 @@ mod tests {
         // one changed section → exactly its own window
         assert_eq!(windows_touched(&p, &[SectionId(0)]), vec![1]);
         assert_eq!(windows_touched(&p, &[SectionId(1)]), vec![9]);
+    }
+
+    #[test]
+    fn qat_window_reuse_fixes_coarse_half_leak_to_15_16_and_31_32() {
+        // Suppose 32 sections across 32 distinct 4096B windows are grouped into
+        // just 2 coarse blocks (16 sections each). Touching 1 section previously
+        // yielded block reuse = 1/2; QAT window reuse preserves 31/32!
+        let mut sections = Vec::new();
+        let mut block0_covers = Vec::new();
+        let mut block1_covers = Vec::new();
+        for i in 0..32u32 {
+            sections.push(Section {
+                id: SectionId(i),
+                name: format!(".rodata.gaia.b158.{i}"),
+                addr: (i as u64 + 1) * 4096,
+                len: 1024,
+                hash: 0x4803_1a0d_4c05_4e69 ^ (i as u64),
+            });
+            if i < 16 {
+                block0_covers.push(SectionId(i));
+            } else {
+                block1_covers.push(SectionId(i));
+            }
+        }
+        let layout = LayoutPlan {
+            sections,
+            blocks: vec![
+                Block { index: 0, covers: block0_covers },
+                Block { index: 1, covers: block1_covers },
+            ],
+            window_size: 4096,
+        };
+        let changed = vec![SectionId(0)];
+        // Coarse block reuse was 1/2:
+        assert_eq!(reuse_ratio_pq(&layout, &changed), RationalPQ { p: 1, q: 2 });
+        // QAT window reuse is 31/32 (zero-float RationalPQ):
+        assert_eq!(
+            reuse_ratio_qat_window_pq(&layout, &changed),
+            RationalPQ { p: 31, q: 32 }
+        );
+        // Touching 2 windows yields 30/32 == 15/16 reduced:
+        assert_eq!(
+            reuse_ratio_qat_window_pq(&layout, &[SectionId(0), SectionId(1)]),
+            RationalPQ { p: 15, q: 16 }
+        );
     }
 }

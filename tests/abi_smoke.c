@@ -27,12 +27,41 @@ int main(void) {
         return 1;
     }
 
+    if (sizeof(wupz_litany_wire_frame_t) != 64u || _Alignof(wupz_litany_wire_frame_t) != 64u) {
+        fprintf(stderr, "abi_smoke: LitanyWireFrame size/align mismatch (%zu / %zu)\n",
+                sizeof(wupz_litany_wire_frame_t), _Alignof(wupz_litany_wire_frame_t));
+        return 1;
+    }
+
     if (diff != 0) {
         fprintf(stderr, "abi_smoke: identical spans must differ by 0\n");
         return 1;
     }
     if (diff2 == 0) {
         fprintf(stderr, "abi_smoke: differing spans must differ by > 0\n");
+        return 1;
+    }
+
+    /* Verify 64-byte cache-line-aligned Litany Wire seal & verify across C ABI */
+    wupz_litany_wire_frame_t wire;
+    const uint8_t raw_sample[16] = "upz-raw-witness!";
+    const uint8_t packed_sample[12] = "upz-packed!!";
+    if (wupz_seal_litany_wire_64b(&wire, raw_sample, 16, packed_sample, 12, WUPZ_GATE_0X62, WUPZ_QUANT_QT55) != 1u) {
+        fprintf(stderr, "abi_smoke: wupz_seal_litany_wire_64b failed\n");
+        return 1;
+    }
+    if (wire.ratio_p != 4u || wire.ratio_q != 3u || wire.lanes_active != 0x0101u) {
+        fprintf(stderr, "abi_smoke: unexpected ratio %u/%u or lanes 0x%04x\n",
+                wire.ratio_p, wire.ratio_q, wire.lanes_active);
+        return 1;
+    }
+    if (wupz_verify_litany_wire_64b(&wire, raw_sample, 16, packed_sample, 12, WUPZ_GATE_0X62, WUPZ_QUANT_QT55) != 1u) {
+        fprintf(stderr, "abi_smoke: wupz_verify_litany_wire_64b rejected valid frame\n");
+        return 1;
+    }
+    wire.wire_seal16 ^= 0x0001u;
+    if (wupz_verify_litany_wire_64b(&wire, raw_sample, 16, packed_sample, 12, WUPZ_GATE_0X62, WUPZ_QUANT_QT55) != 0u) {
+        fprintf(stderr, "abi_smoke: wupz_verify_litany_wire_64b accepted tampered frame\n");
         return 1;
     }
 
@@ -51,7 +80,7 @@ int main(void) {
         }
     }
 
-    printf("abi %u ok (header=rust=zig=%u) · fold=0x%016llx · popcount=%llu · diff=%llu\n",
+    printf("abi %u ok (header=rust=zig=%u) · fold=0x%016llx · popcount=%llu · diff=%llu · litany_wire=64B@align(64)\n",
            WUPZ_ABI_VERSION, hdr,
            (unsigned long long)fold,
            (unsigned long long)pop,

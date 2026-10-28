@@ -1,5 +1,5 @@
 /*
- * wupz_abi.h — the one boundary between wupz-rs (Rust) and wupz-zig (Zig).
+ * wupz_abi.h — the one boundary between wupz-rs / upz-rs (Rust) and wupz-zig / upz-zig (Zig).
  *
  * FROZEN. Any change bumps WUPZ_ABI_VERSION and both sides in lockstep.
  * This header is a contract, not a convenience: if it churns, the seam is
@@ -16,6 +16,33 @@ extern "C" {
 #endif
 
 #define WUPZ_ABI_VERSION 1u
+#define WUPZ_GATE_0X62   0x62u
+#define WUPZ_QUANT_QT55  0x55u
+
+/*
+ * 64-byte cache-line aligned Litany Wire Frame (`align(64)`).
+ * Fits in a single CPU cache line (Apple Silicon M1-M4 / x86_64 AVX-512)
+ * for zero-copy IPC and incremental pack-in-pass verification.
+ */
+#if defined(_MSC_VER)
+#define WUPZ_ALIGN64 __declspec(align(64))
+#elif defined(__GNUC__) || defined(__clang__)
+#define WUPZ_ALIGN64 __attribute__((aligned(64)))
+#else
+#define WUPZ_ALIGN64
+#endif
+
+typedef struct WUPZ_ALIGN64 wupz_litany_wire_frame_s {
+    uint8_t  frame32[32];    /* [0..32]  32B 0x62-gate witness frame */
+    uint64_t bfp64_pos;      /* [32..40] BFP-64 +1 bitplane (fold & qt_mask) */
+    uint64_t bfp64_neg;      /* [40..48] BFP-64 -1 bitplane (fold & ~qt_mask) */
+    uint32_t ratio_p;        /* [48..52] GCD-reduced lossless ratio numerator p */
+    uint32_t ratio_q;        /* [52..56] GCD-reduced lossless ratio denominator q */
+    uint8_t  spqt_root[3];   /* [56..59] 1.585 bits/trit base-243 SPQT 15-trit root */
+    uint8_t  qt_mask;        /* [59]     Quantization mask byte (0x55) */
+    uint16_t lanes_active;   /* [60..62] Active lane ratio word (0x0101 = 1/1) */
+    uint16_t wire_seal16;    /* [62..64] 16-bit XOR fold witness over [0..62] */
+} wupz_litany_wire_frame_t;
 
 /* wupz-rs: the ABI version the Rust core speaks. */
 uint32_t wupz_abi_version(void);
@@ -35,6 +62,30 @@ uint64_t wupz_byte_diff(const uint8_t *a, const uint8_t *b, size_t len);
 
 /* wupz-zig: population count over a span (density hint). */
 uint64_t wupz_popcount(const uint8_t *ptr, size_t len);
+
+/* wupz-zig: seal a 64-byte cache-line-aligned Litany Wire frame at `gate` and `qt`.
+ * Returns 1 on success, 0 on null pointer or invalid input. */
+uint32_t wupz_seal_litany_wire_64b(
+    wupz_litany_wire_frame_t *out_wire,
+    const uint8_t *raw_ptr,
+    size_t raw_len,
+    const uint8_t *packed_ptr,
+    size_t packed_len,
+    uint8_t gate,
+    uint8_t qt
+);
+
+/* wupz-zig: verify a 64-byte Litany Wire frame in constant shape.
+ * Returns 1 if valid, 0 if tampered or null. */
+uint32_t wupz_verify_litany_wire_64b(
+    const wupz_litany_wire_frame_t *wire,
+    const uint8_t *raw_ptr,
+    size_t raw_len,
+    const uint8_t *packed_ptr,
+    size_t packed_len,
+    uint8_t gate,
+    uint8_t qt
+);
 
 /* DSE-resistant memory scrub helper for C/FFI callers (ZA-0003).
  * Uses volatile byte stores + compiler memory barrier so -O2/-O3 Dead Store

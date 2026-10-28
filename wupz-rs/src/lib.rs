@@ -15,6 +15,7 @@ extern crate alloc;
 extern crate std;
 
 pub mod arena;
+pub mod beehive;
 pub mod fold;
 pub mod incremental;
 pub mod pack;

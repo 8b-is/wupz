@@ -1,8 +1,7 @@
 //! wupz-bench — the kernel throughput harness. Dependency-free.
 //!
 //! Measures `xor_fold`, `byte_diff` and `popcount` over a fixed working set and
-//! reports GiB/s using exact integer arithmetic (centi-GiB/s and integer µs/ms).
-//! Run it twice to compare the seam:
+//! reports GiB/s. Run it twice to compare the seam:
 //!
 //! ```text
 //! cargo run --release --bin wupz-bench              # zig-simd (when zig is linked)
@@ -18,7 +17,6 @@ use std::time::{Duration, Instant};
 use wupz_core::fold;
 
 const MIB: usize = 1024 * 1024;
-const GIB_U128: u128 = 1024 * 1024 * 1024;
 const WORKING_SET: usize = 64 * MIB; // 64 MiB
 const RUNS: usize = 9;
 
@@ -38,22 +36,15 @@ fn median(mut samples: Vec<Duration>) -> Duration {
     samples[samples.len() / 2]
 }
 
-/// Throughput in centi-GiB/s (100 = 1 GiB/s), computed with exact u128 integer arithmetic.
-fn gib_per_sec_x100(bytes: usize, d: Duration) -> u64 {
-    let nanos = d.as_nanos();
-    if nanos == 0 {
-        return 0;
+fn gib_per_sec(bytes: usize, d: Duration) -> f64 {
+    let secs = d.as_secs_f64();
+    if secs <= 0.0 {
+        return 0.0;
     }
-    let num = (bytes as u128) * 100 * 1_000_000_000;
-    let den = GIB_U128 * nanos;
-    (num / den) as u64
+    (bytes as f64 / (1024.0 * 1024.0 * 1024.0)) / secs
 }
 
-fn fmt_rate(rate_x100: u64) -> String {
-    format!("{}.{:02}", rate_x100 / 100, rate_x100 % 100)
-}
-
-fn bench<F: FnMut() -> u64>(mut f: F) -> (u64, Duration) {
+fn bench<F: FnMut() -> u64>(mut f: F) -> (f64, Duration) {
     // warm-up
     let _ = black_box(f());
     let mut samples = Vec::with_capacity(RUNS);
@@ -65,7 +56,7 @@ fn bench<F: FnMut() -> u64>(mut f: F) -> (u64, Duration) {
         samples.push(elapsed);
     }
     let med = median(samples);
-    (gib_per_sec_x100(WORKING_SET, med), med)
+    (gib_per_sec(WORKING_SET, med), med)
 }
 
 fn main() {
@@ -87,22 +78,22 @@ fn main() {
 
     let (fold_rate, fold_med) = bench(|| fold::xor_fold(black_box(&a)));
     println!(
-        "{:<24} {:>10} {:>12}",
+        "{:<24} {:>10.2} {:>12}",
         "xor_fold",
-        fmt_rate(fold_rate),
+        fold_rate,
         fmt(fold_med)
     );
 
     let (diff_rate, diff_med) = bench(|| fold::byte_diff(black_box(&a), black_box(&b)));
     println!(
-        "{:<24} {:>10} {:>12}",
+        "{:<24} {:>10.2} {:>12}",
         "byte_diff",
-        fmt_rate(diff_rate),
+        diff_rate,
         fmt(diff_med)
     );
 
     let (pop_rate, pop_med) = bench(|| fold::popcount(black_box(&a)));
-    println!("{:<24} {:>10} {:>12}", "popcount", fmt_rate(pop_rate), fmt(pop_med));
+    println!("{:<24} {:>10.2} {:>12}", "popcount", pop_rate, fmt(pop_med));
 
     println!();
     println!(
@@ -114,8 +105,5 @@ fn main() {
 }
 
 fn fmt(d: Duration) -> String {
-    let micros = d.as_micros();
-    let ms_whole = micros / 1000;
-    let ms_hundredths = (micros % 1000) / 10;
-    format!("{ms_whole}.{ms_hundredths:02} ms")
+    format!("{:.2} ms", d.as_secs_f64() * 1000.0)
 }

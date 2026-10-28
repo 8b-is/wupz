@@ -65,6 +65,7 @@ fn cross_targets_never_invoke_the_native_zig_toolchain() {
             .env("PATH", &scratch.0)
             .env("WUPZ_TEST_MARKER", &marker)
             .env_remove("WUPZ_NO_ZIG")
+            .env_remove("WUPZ_CROSS_ZIG")
             .output()
             .unwrap();
         let stdout = String::from_utf8_lossy(&result.stdout);
@@ -83,4 +84,33 @@ fn cross_targets_never_invoke_the_native_zig_toolchain() {
         );
         assert_eq!(fs::read_dir(&out).unwrap().count(), 0);
     }
+
+    // Verify that `WUPZ_CROSS_ZIG=1` opts in and passes `-target <zig_target>`
+    let args_log = scratch.0.join("zig_args.txt");
+    fs::write(
+        &zig,
+        "#!/bin/sh\nif [ \"$1\" = \"version\" ]; then echo 0.14.0; exit 0; fi\nprintf '%s\\n' \"$*\" > \"$WUPZ_ARGS_LOG\"\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&zig, fs::Permissions::from_mode(0o700)).unwrap();
+    let cross_out = scratch.0.join("cross-opt-in");
+    fs::create_dir(&cross_out).unwrap();
+    let cross_res = Command::new(&script)
+        .env("CARGO_MANIFEST_DIR", &manifest)
+        .env("OUT_DIR", &cross_out)
+        .env("HOST", "aarch64-apple-darwin")
+        .env("TARGET", "aarch64-unknown-linux-gnu")
+        .env("PATH", &scratch.0)
+        .env("WUPZ_ARGS_LOG", &args_log)
+        .env("WUPZ_CROSS_ZIG", "1")
+        .env_remove("WUPZ_NO_ZIG")
+        .output()
+        .unwrap();
+    assert!(cross_res.status.success());
+    let logged = fs::read_to_string(&args_log)
+        .expect("zig build-obj should be invoked with WUPZ_CROSS_ZIG=1");
+    assert!(
+        logged.contains("-target aarch64-linux-gnu"),
+        "expected -target aarch64-linux-gnu in zig invocation, got: {logged}"
+    );
 }

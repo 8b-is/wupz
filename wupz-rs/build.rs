@@ -9,9 +9,23 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+fn cargo_target_to_zig_target(target: &str) -> Option<&'static str> {
+    match target {
+        "aarch64-apple-darwin" => Some("aarch64-macos"),
+        "x86_64-apple-darwin" => Some("x86_64-macos"),
+        "aarch64-unknown-linux-gnu" => Some("aarch64-linux-gnu"),
+        "aarch64-unknown-linux-musl" => Some("aarch64-linux-musl"),
+        "x86_64-unknown-linux-gnu" => Some("x86_64-linux-gnu"),
+        "x86_64-unknown-linux-musl" => Some("x86_64-linux-musl"),
+        "aarch64-linux-android" => Some("aarch64-linux-android"),
+        _ => None,
+    }
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=../wupz-zig/src/kernels.zig");
     println!("cargo:rerun-if-env-changed=WUPZ_NO_ZIG");
+    println!("cargo:rerun-if-env-changed=WUPZ_CROSS_ZIG");
     println!("cargo:rustc-check-cfg=cfg(have_zig)");
 
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR is set by cargo"));
@@ -25,17 +39,28 @@ fn main() {
         return; // explicit opt-out: no warning, no cfg
     }
 
-    // This Zig invocation and archiver build for the host. Linking that object
-    // into a different Cargo target is invalid, even when only the CPU differs.
-    // Keep cross builds on the scalar path until target-aware Zig linking exists.
+    // By default, keep cross builds on the scalar path so host toolchains are
+    // never invoked for a mismatched target unless `WUPZ_CROSS_ZIG=1` opts in
+    // to target-aware `zig build-obj -target <zig_target>`.
     let host = std::env::var("HOST").expect("HOST is set by cargo");
     let target = std::env::var("TARGET").expect("TARGET is set by cargo");
-    if host != target {
-        println!(
-            "cargo:warning=wupz: cross-compiling {host} -> {target} — using the Rust scalar fold"
-        );
-        return;
-    }
+    let cross_zig_target = if host != target {
+        if std::env::var_os("WUPZ_CROSS_ZIG").is_none() {
+            println!(
+                "cargo:warning=wupz: cross-compiling {host} -> {target} — using the Rust scalar fold"
+            );
+            return;
+        }
+        let Some(zig_target) = cargo_target_to_zig_target(&target) else {
+            println!(
+                "cargo:warning=wupz: unsupported Zig cross target {target} — using the Rust scalar fold"
+            );
+            return;
+        };
+        Some(zig_target)
+    } else {
+        None
+    };
 
     let zig_present = Command::new("zig")
         .arg("version")
@@ -52,13 +77,15 @@ fn main() {
 
     // Compile to an object, then archive it with the platform archiver. Zig's
     // own `build-lib` emits members Apple's ld rejects ("not 8-byte aligned"),
-    // so on macOS we route through `libtool`, which writes a well-formed
-    // archive. (The kernels are one object; there is nothing to merge.)
+    // so on macOS host targets we route through `libtool`, which writes a
+    // well-formed archive. (The kernels are one object; there is nothing to merge.)
     let obj = out.join("wupz_kernels.o");
-    let compiled = Command::new("zig")
-        .arg("build-obj")
-        .arg(&src)
-        .args(["-O", "ReleaseFast"])
+    let mut cmd = Command::new("zig");
+    cmd.arg("build-obj").arg(&src).args(["-O", "ReleaseFast"]);
+    if let Some(zt) = cross_zig_target {
+        cmd.args(["-target", zt]);
+    }
+    let compiled = cmd
         .arg(format!("-femit-bin={}", obj.display()))
         .status()
         .map(|s| s.success())

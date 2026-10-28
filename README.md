@@ -166,16 +166,19 @@ The nightly lane ([`nightly-zig.yml`](.github/workflows/nightly-zig.yml)) runs t
 kernels on **Zig master** — `0.18.0-dev.131` passes all five differential tests
 with zero source changes.
 
-## constellation seam (`alexiai` × `gaia-mlx-quant`)
+## constellation seam (`alexiai` · `spherepop-kernel` · `aurora` · `zeno`)
 
 The `wupz` C ABI v1 kernels (`wupz_xor_fold`, `wupz_byte_diff`, `wupz_popcount`),
-the deterministic `"WUPZ"` v1 layout plan image (`pack_into`), incremental
-section diffing (`changed_sections`), and the `wupz.vaked.dev` `QuantTern`
-emotional ternary codec (`qt:<hex>`) are also wired directly into
-[**`8b-is/alexiai`**](https://github.com/8b-is/alexiai) (`gaia_mlx_quant::wupz`
-across Rust `#![no_std]`, C99, Go, and Swift) for zero-alloc, zero-float (`p/q`)
-packing and incremental QAT diffing of `b1.58` and 64-trit quantum bitplane
-weight sections.
+the 32-byte `0x62`-gated frame seal (`sealFrame32B` / `seal_frame_32b`), the
+`comptime`-verified `BFP-64` bitplane fold packer (`packFoldBfp64` / `pack_fold_bfp64`
+at `qt:55` = `0x55`, fold `0xe1034e575c371ab0`, Kleene `+AND=1` / `~NAND=-1`),
+the deterministic `"WUPZ"` v1 layout plan image (`pack_into`), and incremental
+section diffing (`changed_sections`) are aligned across:
+
+- [**`8b-is/alexiai`**](https://github.com/8b-is/alexiai) (`gaia_mlx_quant::wupz` across Rust `#![no_std]`, C99, Go, and Swift) for zero-alloc, zero-float (`p/q`) packing and incremental QAT diffing of `b1.58` and 64-trit bitplane weight sections.
+- [**`8b-is/spherepop-kernel`**](https://github.com/8b-is/spherepop-kernel) (`encode/gate0x62.go` and `verifiers/zig/src/verifier.zig`) for 32-byte `0x62`-gate frame sealing, `BFP-64` bitplane verification, and 4-way unrolled `XORFold` / `Popcount` / SWAR `ByteDiff`.
+- [**`8b-is/aurora`**](https://github.com/8b-is/aurora) (`crates/aurora-core`) for 32-byte `WaveMemoryTuple::to_wupz_bytes` folding, `0x62`-gate frame sealing, and zero-float `BFP-64` verification.
+- [**`8b-is/zeno`**](https://github.com/8b-is/zeno) (`apps/rust/zeno-issuer-angel`) for `#![no_std]` 32-byte `WupzWitnessSeal` attestation over FeliCa NFC-F transit frames and single-use Secure Element handshakes.
 
 ## license
 

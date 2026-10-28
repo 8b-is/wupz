@@ -67,13 +67,25 @@ pub fn windows_touched(plan: &LayoutPlan, changed: &[SectionId]) -> Vec<u64> {
     windows.into_iter().collect()
 }
 
-/// Fraction of blocks reused (not re-packed) — `1.0` means nothing moved.
-pub fn reuse_ratio(plan: &LayoutPlan, changed: &[SectionId]) -> f64 {
-    if plan.blocks.is_empty() {
-        return 1.0;
+fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let r = a % b;
+        a = b;
+        b = r;
     }
-    let repack = blocks_to_repack(plan, changed).len();
-    1.0 - (repack as f64 / plan.blocks.len() as f64)
+    if a == 0 { 1 } else { a }
+}
+
+/// Reduced rational `(p, q)` of blocks reused (not re-packed) — `(1, 1)` means nothing moved.
+pub fn reuse_ratio(plan: &LayoutPlan, changed: &[SectionId]) -> (u64, u64) {
+    let total = plan.blocks.len() as u64;
+    if total == 0 {
+        return (1, 1);
+    }
+    let repack = (blocks_to_repack(plan, changed).len() as u64).min(total);
+    let reused = total - repack;
+    let g = gcd_u64(reused, total);
+    (reused / g, total / g)
 }
 
 #[cfg(test)]
@@ -121,7 +133,7 @@ mod tests {
         let new = plan(&[(0, 0xaa, 0x1000), (1, 0xcc, 0x2000), (2, 0xcc, 0x3000)]);
         let changed = changed_sections(&old, &new);
         assert_eq!(blocks_to_repack(&new, &changed), vec![1]);
-        assert!((reuse_ratio(&new, &changed) - (2.0 / 3.0)).abs() < 1e-9);
+        assert_eq!(reuse_ratio(&new, &changed), (2, 3));
     }
 
     #[test]
@@ -130,7 +142,7 @@ mod tests {
         let new = plan(&[(0, 0xaa, 0x1000), (1, 0xbb, 0x2000)]);
         let changed = changed_sections(&old, &new);
         assert!(changed.is_empty());
-        assert_eq!(reuse_ratio(&new, &changed), 1.0);
+        assert_eq!(reuse_ratio(&new, &changed), (1, 1));
     }
 
     #[test]

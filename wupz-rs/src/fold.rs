@@ -264,7 +264,13 @@ pub fn pack_gaia_b158_into<'a>(trits: &[i8], arena: &'a mut Arena) -> Option<&'a
         let mut k = i;
         while k < chunk_end {
             let t = trits[k];
-            let digit = if t < 0 { 0u8 } else if t == 0 { 1u8 } else { 2u8 };
+            let digit = if t < 0 {
+                0u8
+            } else if t == 0 {
+                1u8
+            } else {
+                2u8
+            };
             byte_val = byte_val.wrapping_add(digit.wrapping_mul(pow3));
             pow3 = pow3.wrapping_mul(3);
             k += 1;
@@ -290,7 +296,13 @@ pub fn xor_fold_gaia_b158(trits: &[i8]) -> (u64, usize, RationalPQ) {
         let mut k = i;
         while k < chunk_end {
             let t = trits[k];
-            let digit = if t < 0 { 0u8 } else if t == 0 { 1u8 } else { 2u8 };
+            let digit = if t < 0 {
+                0u8
+            } else if t == 0 {
+                1u8
+            } else {
+                2u8
+            };
             byte_val = byte_val.wrapping_add(digit.wrapping_mul(pow3));
             pow3 = pow3.wrapping_mul(3);
             k += 1;
@@ -365,9 +377,8 @@ pub fn seal_litany_wire_64b_scalar(raw: &[u8], packed: &[u8], gate: u8, qt: u8) 
         wire_seal16: 0,
     };
     // SAFETY: `LitanyWireFrame` is `#[repr(C, align(64))]` with no uninitialized padding bytes.
-    let wire_bytes = unsafe {
-        core::slice::from_raw_parts((&wire as *const LitanyWireFrame).cast::<u8>(), 64)
-    };
+    let wire_bytes =
+        unsafe { core::slice::from_raw_parts((&wire as *const LitanyWireFrame).cast::<u8>(), 64) };
     wire.wire_seal16 = (xor_fold(&wire_bytes[0..62]) & 0xFFFF) as u16;
     wire
 }
@@ -445,9 +456,8 @@ pub fn verify_litany_wire_64b(
         return false;
     }
     let expected = seal_litany_wire_64b_scalar(raw, packed, gate, qt);
-    let a = unsafe {
-        core::slice::from_raw_parts((wire as *const LitanyWireFrame).cast::<u8>(), 64)
-    };
+    let a =
+        unsafe { core::slice::from_raw_parts((wire as *const LitanyWireFrame).cast::<u8>(), 64) };
     let b = unsafe {
         core::slice::from_raw_parts((&expected as *const LitanyWireFrame).cast::<u8>(), 64)
     };
@@ -522,20 +532,12 @@ mod tests {
         assert_eq!(wire.ratio_q, 3314);
         assert_eq!(wire.lanes_active, LANES_1_OF_1);
         assert!(verify_litany_wire_64b(
-            &wire,
-            &raw,
-            &packed,
-            GATE_0X62,
-            QUANT_QT55
+            &wire, &raw, &packed, GATE_0X62, QUANT_QT55
         ));
 
         wire.wire_seal16 ^= 0x0001;
         assert!(!verify_litany_wire_64b(
-            &wire,
-            &raw,
-            &packed,
-            GATE_0X62,
-            QUANT_QT55
+            &wire, &raw, &packed, GATE_0X62, QUANT_QT55
         ));
 
         let trits = [1i8, -1, 0, 1, -1, 1, 1, 0, -1, 0, 1, -1, 1, 0, -1];

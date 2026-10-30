@@ -281,8 +281,14 @@ mod tests {
         let layout = LayoutPlan {
             sections,
             blocks: vec![
-                Block { index: 0, covers: block0_covers },
-                Block { index: 1, covers: block1_covers },
+                Block {
+                    index: 0,
+                    covers: block0_covers,
+                },
+                Block {
+                    index: 1,
+                    covers: block1_covers,
+                },
             ],
             window_size: 4096,
         };

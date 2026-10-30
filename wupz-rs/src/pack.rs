@@ -16,10 +16,10 @@
 //! blocks[]      index u32 · cover_count u32 · covers u32..
 //! ```
 
-#[cfg(test)]
-use alloc::vec;
 use crate::arena::Arena;
 use crate::plan::LayoutPlan;
+#[cfg(test)]
+use alloc::vec;
 
 pub const MAGIC: [u8; 4] = *b"WUPZ";
 pub const PLAN_VERSION: u8 = 1;

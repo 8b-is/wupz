@@ -1,8 +1,8 @@
 //! The layout plan — the artifact the linker emits and the packer consumes.
 
-use alloc::{string::String, vec::Vec};
 #[cfg(test)]
 use alloc::vec;
+use alloc::{string::String, vec::Vec};
 
 /// A section's identity. Stable across rebuilds: it names a logical input, not
 /// a byte offset.

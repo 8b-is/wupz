@@ -58,6 +58,11 @@ impl Arena {
         Some(&mut self.buf[start..start + len])
     }
 
+    /// Like `alloc` but panics on OOM (for cases where capacity was pre-checked).
+    pub fn alloc_slice(&mut self, len: usize) -> &mut [u8] {
+        self.alloc(len).expect("arena capacity exceeded")
+    }
+
     /// Explicitly scrub the entire arena buffer in place.
     pub fn zeroize(&mut self) {
         zeroize_slice(&mut self.buf);

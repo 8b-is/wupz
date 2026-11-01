@@ -180,6 +180,20 @@ section diffing (`changed_sections`) are aligned across:
 - [**`8b-is/aurora`**](https://github.com/8b-is/aurora) (`crates/aurora-core`) for 32-byte `WaveMemoryTuple::to_wupz_bytes` folding, `0x62`-gate frame sealing, and zero-float `BFP-64` verification.
 - [**`8b-is/zeno`**](https://github.com/8b-is/zeno) (`apps/rust/zeno-issuer-angel`) for `#![no_std]` 32-byte `WupzWitnessSeal` attestation over FeliCa NFC-F transit frames and single-use Secure Element handshakes.
 
+## arnauth identity seal
+
+The **Arnauth** identity system ([`8b-is/arnauth`](https://github.com/8b-is/arnauth))
+uses `wupz-core` for its integrity seals:
+- **Row seals** (`seal_frame_32b`, `verify_frame_32b`) — 32-byte `0x62`-gated
+  frames over identity rows and contact cards.
+- **Beehive consolidation** (`seal_litany_wire_64b`, `verify_litany_wire_64b`) —
+  64-byte Litany wire frames (`qt:55`, gate `0x62`) that compress the entire
+  social graph into a single fold instead of diffing JSON.
+- **Balanced ternary packing** (`pack_gaia_b158_into`) — 5 trits per byte via
+  the pre-sized arena, zero-alloc on the hot path.
+
+See [`wupz-rs/src/fold.rs`](wupz-rs/src/fold.rs) for the shared surface.
+
 ## license
 
 AGPL-3.0-only for wupz's own code. Third-party terms in

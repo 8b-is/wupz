@@ -6,6 +6,13 @@ project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Changed
+- The `base-243` trit packer is now a single shared `pack_trit_chunk` helper
+  with a branchless digit map, used by both `pack_gaia_b158_into` and
+  `xor_fold_gaia_b158`. Encoding is unchanged; the two packers can no longer
+  drift. Length idioms use `div_ceil`, clearing the remaining
+  `clippy::manual_div_ceil` warnings.
+
 ### Fixed
 - Cross-target Cargo builds select the Rust scalar backend instead of linking
   a Zig object compiled for the build host. Native Zig builds are unchanged.

@@ -29,7 +29,7 @@ pub const fn isqrt_u64(n: u64) -> u64 {
     if n < 2 {
         return n;
     }
-    let shift = (64 - n.leading_zeros() + 1) / 2;
+    let shift = (64 - n.leading_zeros()).div_ceil(2);
     let mut x = 1u64 << shift;
     loop {
         let y = (x + n / x) >> 1;

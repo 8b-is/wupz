@@ -83,6 +83,7 @@ pub struct BeehiveConsolidation {
 }
 
 /// Stage 1: Build and rank the Top-100 `8b-is` repository entries using deterministic integer math.
+#[allow(clippy::needless_range_loop)]
 pub fn sweep_top_100_repos() -> Vec<RepoEntry> {
     let mut entries = Vec::with_capacity(TOP_100_COUNT);
     for idx in 0..TOP_100_COUNT {
@@ -134,7 +135,7 @@ pub fn consolidate_top_100() -> BeehiveConsolidation {
             covers: alloc::vec![id],
         });
         // Advance to next 4096B window boundary
-        let windows = (repo.packed_bytes + 4095) / 4096;
+        let windows = repo.packed_bytes.div_ceil(4096);
         current_addr += windows.max(1) * 4096;
     }
 

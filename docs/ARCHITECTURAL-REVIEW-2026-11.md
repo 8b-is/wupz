@@ -114,6 +114,9 @@ The larger PQ wins remain open and are listed below rather than smuggled into a
    own design pass.
 4. **`clippy::manual_div_ceil` in `incremental.rs:32` and `beehive.rs`** — same
    class of nit, left untouched here to keep this PR to the packer.
+   *Resolved in the follow-up lap:* both sites now use `div_ceil`, and the
+   remaining `needless_range_loop` in `beehive.rs` is a documented intentional
+   range loop (`idx` drives both the seed lookup and the synthetic fallback).
 
 ---
 

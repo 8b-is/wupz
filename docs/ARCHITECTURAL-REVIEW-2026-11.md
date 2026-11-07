@@ -113,10 +113,16 @@ The larger PQ wins remain open and are listed below rather than smuggled into a
    `(raw, packed)` pairs through the Go `encode` package and assert the `0x62`
    BFP-64 split matches `wupz-core`. Today the Go side is independent but not
    cross-checked against Rust.
+   *Resolved:* `spherepop-kernel/encode/rust_parity_test.go` pins
+   `PackFoldBFP64`, `SealFrame32B`, and `XORFold` to exact `wupz-core` golden
+   vectors, so the Go bitplane is now a witnessed cross-language check.
 3. **`wupz` ↔ `upz` crate unification.** `upz` is `wupz-core` + extras. The
    extras (CORDIC, quantizer, reloc, entropy) could live behind feature flags in
    one crate instead of two near-identical trees. Large, structural — needs its
    own design pass.
+   *Planned:* `docs/UNIFICATION-PLAN.md` specifies the feature-gated `extras`
+   boundary and the incremental, tree-green migration path. Not force-landed to
+   protect `kernel8` and other `wupz-core` consumers.
 4. **`clippy::manual_div_ceil` in `incremental.rs:32` and `beehive.rs`** — same
    class of nit, left untouched here to keep this PR to the packer.
    *Resolved in the follow-up lap:* both sites now use `div_ceil`, and the

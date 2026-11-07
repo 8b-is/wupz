@@ -104,6 +104,11 @@ The larger PQ wins remain open and are listed below rather than smuggled into a
 1. **Cross-language golden vectors** pinning `upz::quantize_groupwise_l2_ternary_pq`
    to `MLX-QUANT`'s float quantizer on a fixed weight matrix. This is the single
    highest-value correctness test the lane is missing.
+   *Partially resolved:* a Rust golden-vector regression test
+   (`quantize_groupwise_l2_ternary_pq_golden_vector`) now pins the exact integer
+   output (`trits = [1,-1,0,1,-1,0,1,-1]`, `scale = 15513/16384`). The
+   cross-language half — asserting the same matrix against `MLX-QUANT`'s float
+   path — remains open.
 2. **`spherepop-kernel` as a CI witness for the Rust bitplane.** Feed the same
    `(raw, packed)` pairs through the Go `encode` package and assert the `0x62`
    BFP-64 split matches `wupz-core`. Today the Go side is independent but not

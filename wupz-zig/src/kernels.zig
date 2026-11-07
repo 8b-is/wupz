@@ -149,6 +149,39 @@ pub fn popcount(bytes: []const u8) u64 {
     return count;
 }
 
+// ── relocDeltaPatch32: wild-style SIMD PC32 relocation displacement patch ───
+
+/// Scalar reference: add `delta` (wrapping i32) to each slot and return the xorFold
+/// of the patched byte span.
+pub fn relocDeltaPatch32Scalar(slots: []i32, delta: i32) u64 {
+    for (slots) |*s| {
+        s.* +%= delta;
+    }
+    return xorFoldScalar(std.mem.sliceAsBytes(slots));
+}
+
+/// Vectorized: dual @Vector(8, i32) lanes (64B / 16 slots per step) applying
+/// wrapping 32-bit relative displacement adjustments in place, followed by SIMD xorFold.
+pub fn relocDeltaPatch32(slots: []i32, delta: i32) u64 {
+    const vdelta: @Vector(8, i32) = @splat(delta);
+    var i: usize = 0;
+    while (i + 16 <= slots.len) : (i += 16) {
+        const v0: @Vector(8, i32) = slots[i..][0..8].*;
+        const v1: @Vector(8, i32) = slots[i + 8 ..][0..8].*;
+        slots[i..][0..8].* = v0 +% vdelta;
+        slots[i + 8 ..][0..8].* = v1 +% vdelta;
+    }
+    if (i + 8 <= slots.len) {
+        const v0: @Vector(8, i32) = slots[i..][0..8].*;
+        slots[i..][0..8].* = v0 +% vdelta;
+        i += 8;
+    }
+    while (i < slots.len) : (i += 1) {
+        slots[i] +%= delta;
+    }
+    return xorFold(std.mem.sliceAsBytes(slots));
+}
+
 // ── Deterministic p/q Rational Kernel & SPQT (1.585 bits/trit base-243) ─────
 
 pub fn gcdU64(a: u64, b: u64) u64 {
@@ -269,6 +302,188 @@ pub fn xorFoldGaiaB158(trits: []const i8) GaiaB158Digest {
         .packed_bytes = packed_len,
         .ratio = RationalPQ.reduce(@as(u64, trits.len), @as(u64, @max(packed_len, 1))),
     };
+}
+
+// ── 8b-is/polar-densification: Z_{2^32} CORDIC & Stokes Cone Projection ─────
+
+pub const Q16_ONE: i64 = 65536;
+
+/// Precomputed 18-stage integer CORDIC atan(2^-i) table in Z_{2^32} (where 2*pi == 2^32).
+/// Zero floating-point operations at compile time or runtime.
+pub const CORDIC_ATAN_U32: [18]u32 = .{
+    536870912, 316933406, 167458907, 85004756, 42667331, 21354465,
+    10679838,  5340245,   2670163,   1335087,  667544,   333772,
+    166886,    83443,     41722,     20861,    10430,    5215,
+};
+
+/// 18-stage integer CORDIC `atan2(y, x)` returning phase in Z_{2^32} (`[0, 2*pi) <-> [0, 2^32)`).
+pub fn cordicAtan2U32(y: i32, x: i32) u32 {
+    if (x == 0 and y == 0) return 0;
+    const xi: i64 = @as(i64, x);
+    const yi: i64 = @as(i64, y);
+    var x_cur: i64 = 0;
+    var y_cur: i64 = 0;
+    var angle: u32 = 0;
+    if (xi >= 0) {
+        x_cur = xi << 16;
+        y_cur = yi << 16;
+        angle = 0;
+    } else if (yi >= 0) {
+        x_cur = yi << 16;
+        y_cur = (-xi) << 16;
+        angle = 1 << 30;
+    } else {
+        x_cur = (-yi) << 16;
+        y_cur = xi << 16;
+        angle = 3 << 30;
+    }
+
+    for (CORDIC_ATAN_U32, 0..) |atan_step, i| {
+        const shift: u6 = @intCast(i);
+        const x_shift = x_cur >> shift;
+        const y_shift = y_cur >> shift;
+        if (y_cur >= 0) {
+            x_cur = x_cur + y_shift;
+            y_cur = y_cur - x_shift;
+            angle +%= atan_step;
+        } else {
+            x_cur = x_cur - y_shift;
+            y_cur = y_cur + x_shift;
+            angle -%= atan_step;
+        }
+    }
+    return angle;
+}
+
+pub const StokesProjectionPQ = struct {
+    s0: i64,
+    s1: i64,
+    s2: i64,
+    p_norm: i64,
+    phase_u32: u32,
+};
+
+/// Project raw Stokes parameters `(s0, s1, s2)` in Q16 onto the physical polarization
+/// cone `sqrt(s1^2 + s2^2) <= s0` using integer `isqrtU64` + `cordicAtan2U32`.
+pub fn projectStokesConePQ(s0: i64, s1: i64, s2: i64) StokesProjectionPQ {
+    if (s0 <= 0) return .{ .s0 = 0, .s1 = 0, .s2 = 0, .p_norm = 0, .phase_u32 = 0 };
+    const mag_sq: u64 = @intCast(s1 * s1 + s2 * s2);
+    const p_norm: i64 = @intCast(isqrtU64(mag_sq));
+    const phase_u32 = cordicAtan2U32(@truncate(s2), @truncate(s1));
+    if (p_norm <= s0 or p_norm == 0) {
+        return .{ .s0 = s0, .s1 = s1, .s2 = s2, .p_norm = p_norm, .phase_u32 = phase_u32 };
+    }
+    const half = @divTrunc(p_norm, 2);
+    const s1_proj = if (s1 >= 0)
+        @divTrunc(s1 * s0 + half, p_norm)
+    else
+        -@divTrunc((-s1) * s0 + half, p_norm);
+    const s2_proj = if (s2 >= 0)
+        @divTrunc(s2 * s0 + half, p_norm)
+    else
+        -@divTrunc((-s2) * s0 + half, p_norm);
+    return .{ .s0 = s0, .s1 = s1_proj, .s2 = s2_proj, .p_norm = s0, .phase_u32 = phase_u32 };
+}
+
+// ── MLX-QUANT-GAIA: Zero-Float L2-Optimal Group-Wise Ternary Quantizer ──────
+
+/// Zero-float `p/q` equivalent of `MLX-QUANT`'s `quantize_ternary_optimal_groupwise`:
+///   1. Computes mean absolute magnitude `mu = (1/N) * sum(|x_i|)` in Q16.
+///   2. Starts from the L2-optimal Gaussian threshold `tau_0 = (68 * mu) / 100`.
+///   3. Runs 2 steps of coordinate-descent Lloyd-Max refinement:
+///      `alpha = sum_{|x_i| > tau} |x_i| / N_nz`, `tau = alpha / 2`.
+///   4. Emits balanced trits `{-1, 0, +1}` into `out_trits` and returns `RationalPQ(alpha, 65536)`.
+pub fn quantizeGroupwiseL2TernaryPQ(values_q16: []const i32, out_trits: []i8) RationalPQ {
+    const n = @min(values_q16.len, out_trits.len);
+    if (n == 0) return .{ .p = 0, .q = 1 };
+
+    var abs_sum: u64 = 0;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const v: i64 = values_q16[i];
+        abs_sum += @intCast(if (v < 0) -v else v);
+    }
+    const mean_abs: u64 = abs_sum / @as(u64, n);
+    var tau: u64 = (mean_abs * 68) / 100;
+    var alpha: u64 = mean_abs;
+
+    var step: usize = 0;
+    while (step < 2) : (step += 1) {
+        var nz_sum: u64 = 0;
+        var nz_count: u64 = 0;
+        var k: usize = 0;
+        while (k < n) : (k += 1) {
+            const v: i64 = values_q16[k];
+            const av: u64 = @intCast(if (v < 0) -v else v);
+            if (av > tau) {
+                nz_sum += av;
+                nz_count += 1;
+            }
+        }
+        alpha = if (nz_count > 0) nz_sum / nz_count else mean_abs;
+        tau = alpha / 2;
+    }
+
+    var j: usize = 0;
+    while (j < n) : (j += 1) {
+        const v: i64 = values_q16[j];
+        const av: u64 = @intCast(if (v < 0) -v else v);
+        if (av <= tau) {
+            out_trits[j] = 0;
+        } else if (v > 0) {
+            out_trits[j] = 1;
+        } else {
+            out_trits[j] = -1;
+        }
+    }
+    return RationalPQ.reduce(alpha, 65536);
+}
+
+// ── "Where Is The Love?" (The Black Eyed Peas, Elephunk, 2003) 6-Register Signal ─
+
+/// The 6-register ternary signal from "Where Is The Love?" — The Black Eyed Peas (Elephunk, 2003):
+///   0: title  ("Where Is The Love?", question/interrogation) -> +1
+///   1: artist ("The Black Eyed Peas", plural collective)     -> +1
+///   2: album  ("Elephunk", parent album context)             -> +1
+///   3: year   (2003, dated)                                  -> +1
+///   4: genre  (empty field in record, unfiled / Kleene 0)    ->  0
+///   5: source (youtube, kind video, cited)                   -> +1
+pub const WHERE_IS_THE_LOVE_TRITS: [6]i8 = .{ 1, 1, 1, 1, 0, 1 };
+pub const WHERE_IS_THE_LOVE_YEAR: u16 = 2003;
+/// First 5 trits `[+1, +1, +1, +1, 0]` encoded in SPQT base-243:
+/// `2*1 + 2*3 + 2*9 + 2*27 + 1*81 = 161` (`0xA1`).
+pub const WHERE_IS_THE_LOVE_SPQT_BYTE0: u8 = 161;
+
+/// Harvest live environment entropy around the process:
+///   - Stack pointer ASLR address entropy
+///   - Return address / code page ASLR entropy
+///   - 6-register "Where Is The Love?" ternary signal digest (`Elephunk`, 2003)
+///   - Caller-supplied telemetry seed (`extra_seed`)
+/// Folded through SIMD `xorFold` into a non-zero 64-bit witness.
+pub fn collectEnvironmentEntropyFold(extra_seed: u64) u64 {
+    var entropy_buf: [64]u8 align(64) = @splat(0);
+    const stack_addr: u64 = @intFromPtr(&entropy_buf);
+    const fn_addr: u64 = @intFromPtr(&collectEnvironmentEntropyFold);
+    const gaia_witl = xorFoldGaiaB158(WHERE_IS_THE_LOVE_TRITS[0..]);
+
+    std.mem.writeInt(u64, entropy_buf[0..8], stack_addr ^ 0x9E37_79B9_7F4A_7C15, .little);
+    std.mem.writeInt(u64, entropy_buf[8..16], fn_addr ^ FOLD_0XE1034E575C371AB0, .little);
+    std.mem.writeInt(u64, entropy_buf[16..24], gaia_witl.fold ^ @as(u64, WHERE_IS_THE_LOVE_YEAR), .little);
+    std.mem.writeInt(u64, entropy_buf[24..32], extra_seed ^ FOLD_0X48031A0D4C054E69, .little);
+    @memcpy(entropy_buf[32..38], std.mem.asBytes(&WHERE_IS_THE_LOVE_TRITS));
+    entropy_buf[38] = WHERE_IS_THE_LOVE_SPQT_BYTE0;
+    entropy_buf[39] = GATE_0X62;
+    std.mem.writeInt(u64, entropy_buf[40..48], FOLD_0X206F642074737557, .little);
+
+    // Mix hardware cycle/step counter diffusion across bytes [48..64]
+    var diff_acc: u64 = stack_addr +% fn_addr +% extra_seed +% 0x2003_0062;
+    diff_acc = (diff_acc ^ (diff_acc >> 30)) *% 0xBF58_476D_1CE4_E5B9;
+    diff_acc = (diff_acc ^ (diff_acc >> 27)) *% 0x94D0_49BB_1331_11EB;
+    std.mem.writeInt(u64, entropy_buf[48..56], diff_acc ^ (diff_acc >> 31), .little);
+    std.mem.writeInt(u64, entropy_buf[56..64], @as(u64, CORDIC_ATAN_U32[0]) | (@as(u64, CORDIC_ATAN_U32[1]) << 32), .little);
+
+    const fold = xorFold(entropy_buf[0..]);
+    return if (fold == 0) FOLD_0XE1034E575C371AB0 else fold;
 }
 
 // ── 32B 0x62-gate frame sealing & 64B cache-line aligned Litany Wire ─────────
@@ -508,6 +723,23 @@ export fn wupz_popcount(ptr_opt: ?[*]const u8, len: usize) u64 {
     return popcount(ptr[0..len]);
 }
 
+export fn wupz_reloc_delta_patch32(slots_opt: ?[*]i32, count: usize, delta: i32) u64 {
+    defer scrubCallerRegisters();
+    if (count == 0) return 0;
+    const slots = slots_opt orelse return 0;
+    return relocDeltaPatch32(slots[0..count], delta);
+}
+
+export fn wupz_cordic_atan2_u32(y: i32, x: i32) u32 {
+    defer scrubCallerRegisters();
+    return cordicAtan2U32(y, x);
+}
+
+export fn wupz_collect_env_entropy_fold(extra_seed: u64) u64 {
+    defer scrubCallerRegisters();
+    return collectEnvironmentEntropyFold(extra_seed);
+}
+
 export fn wupz_seal_litany_wire_64b(
     out_opt: ?*LitanyWireFrame,
     raw_opt: ?[*]const u8,
@@ -588,6 +820,21 @@ test "popcount matches the scalar reference" {
     var buf: [512]u8 = undefined;
     fill(buf[0..], 0xDEAD_BEEF_CAFE_F00D);
     try std.testing.expectEqual(popcountScalar(buf[0..]), popcount(buf[0..]));
+}
+
+test "relocDeltaPatch32 matches the scalar reference across every count" {
+    var a: [137]i32 = undefined;
+    var b: [137]i32 = undefined;
+    for (&a, &b, 0..) |*sa, *sb, idx| {
+        const v: i32 = @bitCast(@as(u32, @truncate(idx *% 0x9E37_79B9 +% 0x1000)));
+        sa.* = v;
+        sb.* = v;
+    }
+    const delta: i32 = -4096;
+    const fold_vec = relocDeltaPatch32(a[0..], delta);
+    const fold_sca = relocDeltaPatch32Scalar(b[0..], delta);
+    try std.testing.expectEqual(fold_sca, fold_vec);
+    try std.testing.expectEqualSlices(i32, b[0..], a[0..]);
 }
 
 test "xorFold detects a single flipped byte" {
@@ -678,4 +925,39 @@ test "BFP-64 fold 0xe1034e575c371ab0 at qt:55 and multi-block deferred SIMD redu
     try std.testing.expectEqual(xorFoldScalar(a[0..]), xorFold(a[0..]));
     try std.testing.expectEqual(byteDiffScalar(a[0..], b[0..]), byteDiff(a[0..], b[0..]));
     try std.testing.expectEqual(popcountScalar(a[0..]), popcount(a[0..]));
+}
+
+test "polar-densification CORDIC Z_2^32, MLX-QUANT-GAIA L2 groupwise ternary, Where Is The Love signal, and env entropy" {
+    // 1. 4 canonical Sony nanowire polarizer double-angles in Z_{2^32}
+    const q0 = cordicAtan2U32(0, 65536) +% 0x2000_0000;
+    const q1 = cordicAtan2U32(65536, 0) +% 0x2000_0000;
+    const q2 = cordicAtan2U32(0, -65536) +% 0x2000_0000;
+    const q3 = cordicAtan2U32(-65536, 0) +% 0x2000_0000;
+    try std.testing.expectEqual(@as(u32, 0), (q0 >> 30) & 3);
+    try std.testing.expectEqual(@as(u32, 1), (q1 >> 30) & 3);
+    try std.testing.expectEqual(@as(u32, 2), (q2 >> 30) & 3);
+    try std.testing.expectEqual(@as(u32, 3), (q3 >> 30) & 3);
+
+    // 2. Physical Stokes cone projection clamps specular-glint noise to ||(s1, s2)|| <= s0
+    const proj = projectStokesConePQ(32768, 52428, 39321);
+    try std.testing.expect(proj.p_norm <= proj.s0);
+
+    // 3. MLX-QUANT-GAIA zero-float L2 groupwise ternary quantizer
+    const weights_q16 = [_]i32{ 65536, -65536, 2048, 58982, -62259, 0, 61000, -59000 };
+    var out_trits: [8]i8 = @splat(0);
+    const scale_pq = quantizeGroupwiseL2TernaryPQ(weights_q16[0..], out_trits[0..]);
+    try std.testing.expectEqualSlices(i8, &[_]i8{ 1, -1, 0, 1, -1, 0, 1, -1 }, out_trits[0..]);
+    try std.testing.expect(scale_pq.p > 0 and scale_pq.q > 0);
+
+    // 4. "Where Is The Love?" — The Black Eyed Peas (Elephunk, 2003) 6-register signal
+    const witl = xorFoldGaiaB158(WHERE_IS_THE_LOVE_TRITS[0..]);
+    try std.testing.expectEqual(@as(usize, 2), witl.packed_bytes);
+    try std.testing.expectEqual(@as(u64, 3), witl.ratio.p);
+    try std.testing.expectEqual(@as(u64, 1), witl.ratio.q);
+    try std.testing.expectEqual(@as(u64, WHERE_IS_THE_LOVE_SPQT_BYTE0 ^ 2), witl.fold);
+
+    // 5. Environment entropy collector produces non-zero, seed-responsive 64-bit witness
+    const ent_a = wupz_collect_env_entropy_fold(0x2003_0062);
+    const ent_b = wupz_collect_env_entropy_fold(0x2026_0062);
+    try std.testing.expect(ent_a != 0 and ent_b != 0 and ent_a != ent_b);
 }

@@ -72,6 +72,10 @@ retired entirely.
 3. **Make `wupz` the canonical crate.** Port the gated extras from step 1 into
    `wupz/wupz-rs` behind the same `extras` feature. Now `wupz` is the superset
    and `upz` is redundant.
+   ✅ *done:* `wupz` now carries the `extras` feature, the full `fold.rs`
+   superset, and the matching Zig kernels (`wupz_reloc_delta_patch32`,
+   `wupz_cordic_atan2_u32`, `wupz_collect_env_entropy_fold`). `wupz` builds and
+   tests green both with and without `extras`; `upz` is now a strict subset.
 
 4. **Retire `upz`'s duplicate crate.** Either:
    - (a) point `upz/wupz-rs` at `wupz-core` via a path/git dependency and keep

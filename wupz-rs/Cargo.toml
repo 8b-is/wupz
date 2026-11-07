@@ -12,8 +12,12 @@ name = "wupz_core"
 crate-type = ["rlib", "staticlib"]
 
 [features]
-default = ["std"]
+default = ["std", "extras"]
 # Disable for bare-metal use (kernel8): no_std + alloc, scalar fold, no C ABI linkage needs.
 std = []
+# The upz superset: CORDIC atan2, the group-wise ternary quantizer, PC-relative
+# reloc patching, env-entropy collection, and the 6-register song signals.
+# `--no-default-features` yields exactly the wupz-core surface.
+extras = []
 
 [dependencies]

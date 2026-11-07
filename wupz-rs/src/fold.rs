@@ -250,32 +250,35 @@ pub const fn unpack_spqt3b_to_word15(spqt: [u8; 3]) -> Option<u16> {
     Some(word15)
 }
 
+/// Pack up to five balanced trits `{-1, 0, +1}` from `trits[start..end]` into one
+/// SPQT `base-243` byte (`digit = trit + 1`, `3^5 = 243 <= 256`). The digit map is
+/// branchless (`(t > 0) * 2 + (t == 0)`), so the hot packing loop carries no
+/// per-trit branch and both packers below share one definition of the encoding.
+#[inline]
+const fn pack_trit_chunk(trits: &[i8], start: usize, end: usize) -> u8 {
+    let mut byte_val = 0u8;
+    let mut pow3 = 1u8;
+    let mut k = start;
+    while k < end {
+        let t = trits[k];
+        let digit = ((t > 0) as u8) * 2 + ((t == 0) as u8);
+        byte_val = byte_val.wrapping_add(digit.wrapping_mul(pow3));
+        pow3 = pow3.wrapping_mul(3);
+        k += 1;
+    }
+    byte_val
+}
+
 /// Pack balanced ternary weights (`{-1, 0, +1}`) into a `.rodata.gaia.b158` section slice
 /// inside `arena` at 5 trits/byte (`base-243`, `3^5 = 243 <= 256`) with zero heap allocation.
 pub fn pack_gaia_b158_into<'a>(trits: &[i8], arena: &'a mut Arena) -> Option<&'a [u8]> {
-    let packed_len = (trits.len() + 4) / 5;
+    let packed_len = trits.len().div_ceil(5);
     let out = arena.alloc(packed_len)?;
     let mut idx = 0usize;
     let mut i = 0usize;
     while i < trits.len() {
         let chunk_end = (i + 5).min(trits.len());
-        let mut byte_val = 0u8;
-        let mut pow3 = 1u8;
-        let mut k = i;
-        while k < chunk_end {
-            let t = trits[k];
-            let digit = if t < 0 {
-                0u8
-            } else if t == 0 {
-                1u8
-            } else {
-                2u8
-            };
-            byte_val = byte_val.wrapping_add(digit.wrapping_mul(pow3));
-            pow3 = pow3.wrapping_mul(3);
-            k += 1;
-        }
-        out[idx] = byte_val;
+        out[idx] = pack_trit_chunk(trits, i, chunk_end);
         idx += 1;
         i += 5;
     }
@@ -291,23 +294,7 @@ pub fn xor_fold_gaia_b158(trits: &[i8]) -> (u64, usize, RationalPQ) {
     let mut i = 0usize;
     while i < trits.len() {
         let chunk_end = (i + 5).min(trits.len());
-        let mut byte_val = 0u8;
-        let mut pow3 = 1u8;
-        let mut k = i;
-        while k < chunk_end {
-            let t = trits[k];
-            let digit = if t < 0 {
-                0u8
-            } else if t == 0 {
-                1u8
-            } else {
-                2u8
-            };
-            byte_val = byte_val.wrapping_add(digit.wrapping_mul(pow3));
-            pow3 = pow3.wrapping_mul(3);
-            k += 1;
-        }
-        word_buf[word_idx] = byte_val;
+        word_buf[word_idx] = pack_trit_chunk(trits, i, chunk_end);
         word_idx += 1;
         packed_len += 1;
         if word_idx == 8 {
@@ -548,5 +535,30 @@ mod tests {
         assert_eq!(len_val, 3);
         assert_eq!(ratio, RationalPQ { p: 5, q: 1 });
         assert_eq!(fold_val, xor_fold_scalar(packed_gaia));
+    }
+
+    #[test]
+    fn pack_trit_chunk_is_branchless_and_matches_reference() {
+        // The branchless digit map must agree with the reference `if/else` for every
+        // i8, including out-of-contract values, so the shared packer is a drop-in.
+        for t in i8::MIN..=i8::MAX {
+            let reference = if t < 0 {
+                0u8
+            } else if t == 0 {
+                1u8
+            } else {
+                2u8
+            };
+            let branchless = ((t > 0) as u8) * 2 + ((t == 0) as u8);
+            assert_eq!(branchless, reference, "digit mismatch for trit {t}");
+        }
+
+        // A full 5-trit chunk packs to the documented SPQT base-243 byte.
+        let all_pos = [1i8, 1, 1, 1, 1];
+        assert_eq!(pack_trit_chunk(&all_pos, 0, 5), 242); // 3^5 - 1
+        let all_neg = [-1i8, -1, -1, -1, -1];
+        assert_eq!(pack_trit_chunk(&all_neg, 0, 5), 0);
+        let all_zero = [0i8, 0, 0, 0, 0];
+        assert_eq!(pack_trit_chunk(&all_zero, 0, 5), 121); // (3^5 - 1) / 2
     }
 }

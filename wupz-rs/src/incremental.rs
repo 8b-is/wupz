@@ -1,16 +1,61 @@
 //! The incremental rebuild rule — which sections changed, which blocks must be
 //! re-packed, and which address windows a change perturbs.
 //!
-//! Includes `upz` zero-float `RationalPQ` (`p/q`) arithmetic and QAT sub-window
+//! Includes `upz` zero-float `RationalPQ` (`p/q`) arithmetic, `wild`-style `O(1)`
+//! flat `u64` bitset section membership (`SectionBitSet`), and QAT sub-window
 //! reuse tracking to eliminate the coarse `reuse = 1/2` block invalidation leak
 //! when a multi-section block has only a single 4096B QAT window modified
 //! (`1/2 -> 15/16 -> 31/32`).
 
 use crate::plan::{LayoutPlan, SectionId};
 use alloc::collections::BTreeSet;
-use alloc::vec::Vec;
 #[cfg(test)]
-use alloc::{format, vec};
+use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
+
+/// Maximum dense `SectionId` stored in the flat L1 `u64` word bitset before
+/// falling back to `BTreeSet` for sparse IDs. `65,536` sections = `1024` `u64` words (8 KiB).
+const MAX_DENSE_SECTION_ID: u32 = 65_536;
+
+/// `wild`-style flat `u64` bitset for `O(1)` section membership checks without
+/// pointer-chasing B-tree heap nodes on the hot incremental repack path.
+struct SectionBitSet {
+    words: Vec<u64>,
+    sparse: BTreeSet<SectionId>,
+}
+
+impl SectionBitSet {
+    fn from_slice(ids: &[SectionId]) -> Self {
+        let mut max_dense: Option<u32> = None;
+        for id in ids {
+            if id.0 < MAX_DENSE_SECTION_ID {
+                max_dense = Some(max_dense.map_or(id.0, |m| m.max(id.0)));
+            }
+        }
+        let word_count = max_dense.map_or(0, |m| (m as usize >> 6) + 1);
+        let mut words = vec![0u64; word_count];
+        let mut sparse = BTreeSet::new();
+        for &id in ids {
+            if (id.0 as usize >> 6) < words.len() {
+                words[id.0 as usize >> 6] |= 1u64 << (id.0 & 63);
+            } else {
+                sparse.insert(id);
+            }
+        }
+        Self { words, sparse }
+    }
+
+    #[inline]
+    fn contains(&self, id: SectionId) -> bool {
+        let word_idx = id.0 as usize >> 6;
+        if word_idx < self.words.len() {
+            ((self.words[word_idx] >> (id.0 & 63)) & 1) != 0
+        } else {
+            self.sparse.contains(&id)
+        }
+    }
+}
 
 /// Binary/Euclidean greatest common divisor over `u64` (returns `1` when both are `0`).
 #[inline]
@@ -69,7 +114,7 @@ impl RationalPQ {
 ///
 /// A section is changed when it is new, when its content hash moved, or when its
 /// size moved. A section that *disappeared* also counts — dropping bytes is a
-/// change too.
+/// change too. Uses `LayoutPlan::section` (`O(1)` on dense `SectionId` tables).
 pub fn changed_sections(old: &LayoutPlan, new: &LayoutPlan) -> Vec<SectionId> {
     let mut changed = BTreeSet::new();
     for n in &new.sections {
@@ -90,11 +135,16 @@ pub fn changed_sections(old: &LayoutPlan, new: &LayoutPlan) -> Vec<SectionId> {
 
 /// Blocks whose covering set intersects the changed set. Exactly these must be
 /// re-packed; every other block is reused verbatim.
+///
+/// Uses `SectionBitSet` for `O(1)` bit-test membership per cover entry.
 pub fn blocks_to_repack(plan: &LayoutPlan, changed: &[SectionId]) -> Vec<u32> {
-    let set: BTreeSet<SectionId> = changed.iter().copied().collect();
+    if changed.is_empty() {
+        return Vec::new();
+    }
+    let set = SectionBitSet::from_slice(changed);
     plan.blocks
         .iter()
-        .filter(|b| b.covers.iter().any(|s| set.contains(s)))
+        .filter(|b| b.covers.iter().any(|&s| set.contains(s)))
         .map(|b| b.index)
         .collect()
 }
@@ -258,9 +308,6 @@ mod tests {
 
     #[test]
     fn qat_window_reuse_fixes_coarse_half_leak_to_15_16_and_31_32() {
-        // Suppose 32 sections across 32 distinct 4096B windows are grouped into
-        // just 2 coarse blocks (16 sections each). Touching 1 section previously
-        // yielded block reuse = 1/2; QAT window reuse preserves 31/32!
         let mut sections = Vec::new();
         let mut block0_covers = Vec::new();
         let mut block1_covers = Vec::new();
@@ -293,14 +340,11 @@ mod tests {
             window_size: 4096,
         };
         let changed = vec![SectionId(0)];
-        // Coarse block reuse was 1/2:
         assert_eq!(reuse_ratio_pq(&layout, &changed), RationalPQ { p: 1, q: 2 });
-        // QAT window reuse is 31/32 (zero-float RationalPQ):
         assert_eq!(
             reuse_ratio_qat_window_pq(&layout, &changed),
             RationalPQ { p: 31, q: 32 }
         );
-        // Touching 2 windows yields 30/32 == 15/16 reduced:
         assert_eq!(
             reuse_ratio_qat_window_pq(&layout, &[SectionId(0), SectionId(1)]),
             RationalPQ { p: 15, q: 16 }

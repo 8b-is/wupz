@@ -129,11 +129,28 @@ impl LayoutPlan {
         self.sections.iter().map(|s| s.len).sum()
     }
 
+    /// Resolve a section by `SectionId`.
+    ///
+    /// Fast path (`wild`-linker dense section table trick): when sections are stored
+    /// in dense `SectionId(0..N)` order, `self.sections.get(id.0 as usize)` resolves
+    /// in `O(1)` direct array indexing without scanning. Falls back to linear scan
+    /// when sections are sparse or reordered.
+    #[inline]
     pub fn section(&self, id: SectionId) -> Option<&Section> {
+        if let Some(s) = self.sections.get(id.0 as usize).filter(|s| s.id == id) {
+            return Some(s);
+        }
         self.sections.iter().find(|s| s.id == id)
     }
 
+    /// Resolve a block by `index`.
+    ///
+    /// Fast path: `O(1)` direct array indexing when `self.blocks[index]` matches `index`.
+    #[inline]
     pub fn block(&self, index: u32) -> Option<&Block> {
+        if let Some(b) = self.blocks.get(index as usize).filter(|b| b.index == index) {
+            return Some(b);
+        }
         self.blocks.iter().find(|b| b.index == index)
     }
 
@@ -144,12 +161,30 @@ impl LayoutPlan {
 
     /// Address-independent window index for an address, without narrowing the
     /// address space. A zero window size is treated as one byte.
+    #[inline]
     pub fn window_of(&self, addr: u64) -> u64 {
         addr / self.window_size.max(1)
     }
 
+    /// `wild`-style linear prefix-sum section address layout pass: assigns aligned
+    /// output addresses starting from `base_addr` with power-of-two `align` (minimum 1)
+    /// in a single forward sweep and returns the final end address.
+    pub fn prefix_sum_section_addrs(&mut self, base_addr: u64, align: u64) -> u64 {
+        let step_align = if align.is_power_of_two() { align } else { 1 };
+        let mask = step_align - 1;
+        let mut cursor = base_addr;
+        for s in &mut self.sections {
+            cursor = cursor.saturating_add(mask) & !mask;
+            s.addr = cursor;
+            cursor = cursor.saturating_add(s.len);
+        }
+        cursor
+    }
+
     /// Fold the plan into a deterministic 64-bit digest (names + addrs + hashes).
-    /// Deterministic on purpose: the plan image is reproducible byte for byte.
+    ///
+    /// Uses word-wide `fold::xor_fold` over section names instead of byte-by-byte
+    /// loops so long symbol/section names fold at SIMD bandwidth.
     pub fn digest(&self) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a offset basis
         let mut mix = |x: u64| {
@@ -162,9 +197,8 @@ impl LayoutPlan {
             mix(s.addr);
             mix(s.len);
             mix(s.hash);
-            for b in s.name.as_bytes() {
-                mix(*b as u64);
-            }
+            mix(s.name.len() as u64);
+            mix(crate::fold::xor_fold(s.name.as_bytes()));
         }
         for b in &self.blocks {
             mix(b.index as u64);
@@ -241,6 +275,20 @@ mod tests {
         let p = sample();
         assert_eq!(p.block_for(SectionId(1)).map(|b| b.index), Some(1));
         assert!(p.block_for(SectionId(9)).is_none());
+    }
+
+    #[test]
+    fn prefix_sum_section_addrs_aligns_monotonically() {
+        let mut p = sample();
+        p.sections[0].addr = 0;
+        p.sections[0].len = 500;
+        p.sections[1].addr = 0;
+        p.sections[1].len = 128;
+        let end = p.prefix_sum_section_addrs(0x1000, 64);
+        assert_eq!(p.sections[0].addr, 0x1000);
+        // 0x1000 + 500 = 4596 -> aligned up to 64B = 4608 (0x1200)
+        assert_eq!(p.sections[1].addr, 0x1200);
+        assert_eq!(end, 0x1280);
     }
 
     #[test]

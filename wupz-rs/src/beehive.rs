@@ -83,18 +83,17 @@ pub struct BeehiveConsolidation {
 }
 
 /// Stage 1: Build and rank the Top-100 `8b-is` repository entries using deterministic integer math.
-#[allow(clippy::needless_range_loop)]
 pub fn sweep_top_100_repos() -> Vec<RepoEntry> {
     let mut entries = Vec::with_capacity(TOP_100_COUNT);
     for idx in 0..TOP_100_COUNT {
-        let (name, raw_bytes, packed_bytes, dep_depth) = if idx < SEED_REPOS.len() {
-            let (n, r, p, d) = SEED_REPOS[idx];
-            (String::from(n), r, p, d)
-        } else {
-            let r = 4096u64 + ((idx as u64) * 256);
-            let p = 1024u64 + ((idx as u64) * 64);
-            let d = 4 + ((idx as u32) % 6);
-            (format!("8b-is-module-{idx:03}"), r, p, d)
+        let (name, raw_bytes, packed_bytes, dep_depth) = match SEED_REPOS.get(idx) {
+            Some(&(n, r, p, d)) => (String::from(n), r, p, d),
+            None => {
+                let r = 4096u64 + ((idx as u64) * 256);
+                let p = 1024u64 + ((idx as u64) * 64);
+                let d = 4 + ((idx as u32) % 6);
+                (format!("8b-is-module-{idx:03}"), r, p, d)
+            }
         };
         let density = RationalPQ::reduce(raw_bytes, packed_bytes);
         let fold_hash = xor_fold(name.as_bytes())
@@ -236,6 +235,104 @@ impl DreamStateMachine {
     }
 }
 
+// ── WiGLE DataBomb v3.0 Custodian (`Record != Admit != Commit`) + `<~~0o0|v2|...|0o0~~>` ─
+
+/// Exact integer square root `floor(sqrt(n))` with zero IEEE-754 floating-point operations.
+pub const fn isqrt_u64(n: u64) -> u64 {
+    if n < 2 {
+        return n;
+    }
+    let mut x = n;
+    let mut y = (x + 1) >> 1;
+    while y < x {
+        x = y;
+        y = (x + n / x) >> 1;
+    }
+    x
+}
+
+/// Custodian promotion stage (`Record != Admit != Commit`) for Wireless Environmental Memory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i8)]
+pub enum WigleCustodianStage {
+    /// `-1`: Immutable raw RF observation captured (`[timestamp, fix_id, ssid_fold, rssi]`), not yet admitted.
+    Record = -1,
+    /// `0`: Candidate hypothesis admitted after IE fingerprint + `isqrt_u64` velocity plausibility check.
+    Admit = 0,
+    /// `+1`: Custodian-committed observation promoted into the sealed `DataBomb v3.0` cell (`29/30` @ `0x62`).
+    Commit = 1,
+}
+
+/// Decoupled `LocationFix` ("where", `lat_e7 / lon_e7`) vs `RfObservation` ("what").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WigleDataBombCell {
+    pub fix_id: u32,
+    pub lat_e7: i32,
+    pub lon_e7: i32,
+    pub ssid_fold: u64,
+    pub rssi_dbm: i16,
+    pub stage: WigleCustodianStage,
+    pub codec_density: RationalPQ,
+    pub lossless_ratio: RationalPQ,
+    pub wire: LitanyWireFrame,
+}
+
+/// Evaluate a passive ESP32-S3 / WiGLE observation under the `DataBomb v3.0` Custodian Principle
+/// (`Record != Admit != Commit`), verify movement plausibility via `isqrt_u64`, and seal the
+/// `<~~0o0|v2|...|0o0~~>` 5-stage digest at `407/389` density and `29/30` lossless ratio (`0x62`).
+#[allow(clippy::too_many_arguments)]
+pub fn seal_wigle_databomb_v3_custodian(
+    fix_id: u32,
+    lat_e7: i32,
+    lon_e7: i32,
+    prev_lat_e7: i32,
+    prev_lon_e7: i32,
+    ssid: &[u8],
+    rssi_dbm: i16,
+    ie_similarity_pct: u8,
+) -> WigleDataBombCell {
+    let dlat = (lat_e7 as i64 - prev_lat_e7 as i64).unsigned_abs();
+    let dlon = (lon_e7 as i64 - prev_lon_e7 as i64).unsigned_abs();
+    let dist_e7 = isqrt_u64(
+        dlat.saturating_mul(dlat)
+            .saturating_add(dlon.saturating_mul(dlon)),
+    );
+
+    // Impossible-movement penalty: > 50,000 e7 units (~500m per 5s scan) demotes back to Record
+    let stage = if dist_e7 > 50_000 || rssi_dbm < -85 {
+        WigleCustodianStage::Record
+    } else if rssi_dbm >= -72 && ie_similarity_pct >= 80 {
+        WigleCustodianStage::Commit
+    } else {
+        WigleCustodianStage::Admit
+    };
+
+    let ssid_fold = xor_fold(ssid);
+    let stage_byte = (stage as i8 + 1) as u8;
+    let frame_v2 = format!(
+        "<~~0o0|v2|fix:{fix_id}|lat:{lat_e7}|lon:{lon_e7}|fold:{ssid_fold:016x}|rssi:{rssi_dbm}|st:{stage_byte}|0o0~~>"
+    );
+    let packed = [
+        GATE_0X62,
+        stage_byte,
+        ie_similarity_pct,
+        (rssi_dbm.unsigned_abs() & 0xFF) as u8,
+    ];
+    let wire = seal_litany_wire_64b(frame_v2.as_bytes(), &packed, GATE_0X62, QUANT_QT55);
+
+    WigleDataBombCell {
+        fix_id,
+        lat_e7,
+        lon_e7,
+        ssid_fold,
+        rssi_dbm,
+        stage,
+        codec_density: RationalPQ::reduce(407, 389),
+        lossless_ratio: RationalPQ::reduce(29, 30),
+        wire,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,5 +358,20 @@ mod tests {
             GATE_0X62,
             QUANT_QT55,
         ));
+
+        let cell = seal_wigle_databomb_v3_custodian(
+            108,
+            356_852_000,
+            139_710_000,
+            356_851_900,
+            139_709_950,
+            b"Rakuten-4CE2",
+            -61,
+            95,
+        );
+        assert_eq!(cell.stage, WigleCustodianStage::Commit);
+        assert_eq!(cell.codec_density, RationalPQ { p: 407, q: 389 });
+        assert_eq!(cell.lossless_ratio, RationalPQ { p: 29, q: 30 });
+        assert_eq!(cell.wire.frame32[24], GATE_0X62);
     }
 }

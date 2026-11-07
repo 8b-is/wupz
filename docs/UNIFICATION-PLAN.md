@@ -62,6 +62,12 @@ retired entirely.
    `--no-default-features`, diff its public `fold`/`plan`/`pack`/`arena`/
    `incremental`/`beehive` API against `wupz`'s. They must match exactly. Add a
    CI job that builds both and compares `cargo public-api` output.
+   ✅ *done:* the core had drifted — `upz` was **ahead** of `wupz` by
+   `Arena::alloc_aligned`, `LayoutPlan::prefix_sum_section_addrs` (+ `resolve`
+   fast paths), `incremental::SectionBitSet`, `beehive::isqrt_u64`, and
+   `beehive::seal_wigle_databomb_v3_custodian`. Those were synced into `wupz`;
+   `arena.rs`, `plan.rs`, `pack.rs`, `incremental.rs`, `beehive.rs`, and
+   `lib.rs` are now byte-identical across the two repos.
 
 3. **Make `wupz` the canonical crate.** Port the gated extras from step 1 into
    `wupz/wupz-rs` behind the same `extras` feature. Now `wupz` is the superset

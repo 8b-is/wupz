@@ -1,7 +1,7 @@
 //! The arena — one allocation up front, none on the hot path.
 //!
-//! `Arena::with_capacity` allocates once. After that, `alloc` hands out slices
-//! and never touches the global allocator. The post-layout invariant
+//! `Arena::with_capacity` allocates once. After that, `alloc` and `alloc_aligned`
+//! hand out slices and never touch the global allocator. The post-layout invariant
 //! (`docs/DESIGN.md` §5) is: once the plan is sealed, packing must not allocate.
 //! The integration test `tests/no_alloc.rs` enforces it with a counting
 //! allocator.
@@ -58,9 +58,26 @@ impl Arena {
         Some(&mut self.buf[start..start + len])
     }
 
-    /// Like `alloc` but panics on OOM (for cases where capacity was pre-checked).
-    pub fn alloc_slice(&mut self, len: usize) -> &mut [u8] {
-        self.alloc(len).expect("arena capacity exceeded")
+    /// Bump-allocate `len` zeroed bytes whose starting address is aligned to `align`
+    /// (must be a non-zero power of two, e.g. `8`, `16`, `32`, `64` cache line).
+    /// Returns `None` if `align` is not a power of two or if remaining capacity is
+    /// insufficient. Never grows the underlying buffer.
+    pub fn alloc_aligned(&mut self, len: usize, align: usize) -> Option<&mut [u8]> {
+        if !align.is_power_of_two() {
+            return None;
+        }
+        let base_addr = self.buf.as_ptr() as usize;
+        let curr_addr = base_addr.checked_add(self.used)?;
+        let mask = align - 1;
+        let aligned_addr = curr_addr.checked_add(mask)? & !mask;
+        let pad = aligned_addr - curr_addr;
+        let total = pad.checked_add(len)?;
+        if total > self.remaining() {
+            return None;
+        }
+        let start = self.used + pad;
+        self.used += total;
+        Some(&mut self.buf[start..start + len])
     }
 
     /// Explicitly scrub the entire arena buffer in place.
@@ -148,6 +165,20 @@ mod tests {
         let first = a.alloc(8).unwrap().as_ptr() as usize;
         let second = a.alloc(8).unwrap().as_ptr() as usize;
         assert_eq!(second, first + 8);
+    }
+
+    #[test]
+    fn alloc_aligned_honors_64_byte_cache_line_alignment() {
+        let mut a = Arena::with_capacity(256);
+        // Intentionally misalign cursor by 3 bytes
+        let _ = a.alloc(3).unwrap();
+        let aligned = a.alloc_aligned(64, 64).unwrap();
+        assert_eq!((aligned.as_ptr() as usize) % 64, 0);
+        assert_eq!(aligned.len(), 64);
+        // Non-power-of-two alignment is rejected without advancing cursor
+        let used_before = a.used();
+        assert!(a.alloc_aligned(16, 3).is_none());
+        assert_eq!(a.used(), used_before);
     }
 
     #[test]

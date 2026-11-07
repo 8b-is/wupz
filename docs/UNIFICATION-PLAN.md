@@ -41,7 +41,7 @@ retired entirely.
 
 ## Steps (each keeps the tree green)
 
-1. **Gate the extras in `upz/wupz-rs/src/fold.rs` behind `extras`.**
+1. **Gate the extras in `upz/wupz-rs/src/fold.rs` behind `extras`.** ✅ *done*
    - Add the `extras` feature to `upz/wupz-rs/Cargo.toml` (`default = ["std", "extras"]`).
    - Wrap the contiguous extras block (`// ── 8b-is/polar-densification …`
      through the end of the impl, before `#[cfg(test)] mod tests`) in

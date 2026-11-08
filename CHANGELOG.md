@@ -12,6 +12,14 @@ project adheres to [Semantic Versioning](https://semver.org).
   `xor_fold_gaia_b158`. Encoding is unchanged; the two packers can no longer
   drift. Length idioms use `div_ceil`, clearing the remaining
   `clippy::manual_div_ceil` warnings.
+- `wupz` is now the canonical superset of the former `upz` crate. The shared
+  core was synced up (`Arena::alloc_aligned`, `LayoutPlan::prefix_sum_section_addrs`
+  and resolve fast paths, `incremental::SectionBitSet`, `beehive::isqrt_u64` and
+  `seal_wigle_databomb_v3_custodian`), and the `upz` extras (CORDIC, the
+  group-wise ternary quantizer, reloc patching, env-entropy, song signals) now
+  live behind a default-on `extras` feature with matching Zig kernels.
+  `--no-default-features --features std` yields the bare core. See
+  `docs/UNIFICATION-PLAN.md`.
 
 ### Fixed
 - Cross-target Cargo builds select the Rust scalar backend instead of linking
